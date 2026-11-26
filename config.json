@@ -1,0 +1,21 @@
+{
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 3020
+  },
+  "p2p": {
+    "host": "0.0.0.0",
+    "port": 3021
+  },
+  "snowluma": {
+    "enabled": false,
+    "wsUrl": "ws://127.0.0.1:3001",
+    "accessToken": "",
+    "homeDir": ""
+  },
+  "openp2p": {
+    "enabled": false,
+    "exePath": "",
+    "token": ""
+  }
+}

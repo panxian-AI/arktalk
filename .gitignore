@@ -1,0 +1,13 @@
+# 本机数据（账号/聊天记录/文件缓存）——绝不入库
+data/
+# QQNT 逆向时的临时产物——不入库
+.qqnt/
+.qqnt-tree.json
+# 本地验证截图
+verify-*.png
+# 依赖
+node_modules/
+# 日志与临时文件
+*.log
+.DS_Store
+Thumbs.db

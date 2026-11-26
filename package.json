@@ -1,0 +1,21 @@
+{
+  "name": "arktalk",
+  "version": "0.5.0",
+  "type": "module",
+  "description": "ArkTalk —— 完全独立的端对端聊天软件：账号认设备、联系人手动添加、自研 P2P 内核（设备间 WS 直连）、可被 SnowLuma 注入",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "start": "node src/main.js",
+    "app": "node scripts/launch-app.cjs",
+    "selftest": "node test/selftest.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "electron": "^45.5.0"
+  }
+}
