@@ -1,13 +1,13 @@
 {
-  "version": "0.6.4",
-  "versionCode": 31,
-  "tag": "v0.6.4",
+  "version": "0.6.5",
+  "versionCode": 32,
+  "tag": "v0.6.5",
   "stable": true,
-  "published": "2026-11-27",
-  "notes": "修复自动更新识别/卡住（多线路测速选最快）；新增多令牌保存与切换（电脑+安卓）",
+  "published": "2026-11-28",
+  "notes": "聊天记录/配置一键导出导入（跨版本兼容、电脑手机互通）；更新时自动保留账号ID、配置与聊天记录",
   "assets": {
-    "windows": "https://github.com/panxian-AI/arktalk/releases/download/v0.6.4/ArkTalk-0.6.4-win64.zip",
-    "android": "https://github.com/panxian-AI/arktalk-android/releases/download/v0.6.4/arktalk-v0.6.4-release.apk"
+    "windows": "https://github.com/panxian-AI/arktalk/releases/download/v0.6.5/ArkTalk-0.6.5-win64.zip",
+    "android": "https://github.com/panxian-AI/arktalk-android/releases/download/v0.6.5/arktalk-v0.6.5-release.apk"
   },
   "_说明": "只有 stable=true 的版本才会被客户端检测为可更新。日常修复版照常发 Release，但不要改这个文件——只有用户明确说『这是正式版/稳定版』时才把 version/tag/assets 更新到这里并推送。"
 }
