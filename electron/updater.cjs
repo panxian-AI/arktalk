@@ -157,6 +157,60 @@ function versionOf(pkgDir) {
   catch { return '0'; }
 }
 
+/** 深合并：以 base 为底，override 的同名值覆盖；对象递归，数组/标量直接替换。 */
+function deepMerge(base, override) {
+  const out = { ...(base || {}) };
+  for (const [k, v] of Object.entries(override || {})) {
+    if (v && typeof v === 'object' && !Array.isArray(v) &&
+        out[k] && typeof out[k] === 'object' && !Array.isArray(out[k])) {
+      out[k] = deepMerge(out[k], v);
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+/**
+ * 更新迁移：把当前版本的账号 ID / 配置 / 聊天记录带进新目录，保证「更新后 ID 配置不变」。
+ * 打包版用户数据在 <root>/resources/app/{config.json,data/}；开发版直接在 <root>/。
+ * 回退无需处理：.bak 本身就是含完整数据的旧目录，换回来即原样恢复。
+ */
+function migrateUserData(oldRoot, newRoot, log = () => {}) {
+  const appSub = (r) => {
+    const c = path.join(r, 'resources', 'app');
+    return fs.existsSync(c) ? c : r;
+  };
+  const oldApp = appSub(oldRoot);
+  const newApp = appSub(newRoot);
+
+  // 1) data/（身份 contacts.json、聊天记录 messages/、已读标记、文件登记…）整目录覆盖复制。
+  //    新解压包里的 data/ 是空模板，不存在冲突；force 覆盖同名、保留新版可能新增的文件。
+  const oldData = path.join(oldApp, 'data');
+  const newData = path.join(newApp, 'data');
+  if (fs.existsSync(oldData)) {
+    fs.mkdirSync(newData, { recursive: true });
+    fs.cpSync(oldData, newData, { recursive: true, force: true });
+    log(`迁移数据：${oldData} → ${newData}`);
+  }
+
+  // 2) config.json：以新版为底深合并旧的用户配置，既保住存储路径等设置，又保留新版新增字段。
+  const oldCfg = path.join(oldApp, 'config.json');
+  const newCfg = path.join(newApp, 'config.json');
+  if (fs.existsSync(oldCfg)) {
+    try {
+      const o = JSON.parse(fs.readFileSync(oldCfg, 'utf8').replace(/^\uFEFF/, ''));
+      let n = {};
+      try { n = JSON.parse(fs.readFileSync(newCfg, 'utf8').replace(/^\uFEFF/, '')); } catch { /* 新版无则用旧的 */ }
+      fs.writeFileSync(newCfg, JSON.stringify(deepMerge(n, o), null, 2) + '\n');
+      log(`迁移配置：${oldCfg} → ${newCfg}`);
+    } catch (e) {
+      try { fs.copyFileSync(oldCfg, newCfg); } catch { /* ignore */ }
+      log(`配置迁移降级为整份复制：${e.message}`);
+    }
+  }
+}
+
 /** 应用根目录（解压后的 ArkTalk-0.6.x-win64）。开发模式下用 dist 里的应用目录。 */
 function appRoot(app) {
   if (app.isPackaged) return path.resolve(app.getAppPath(), '..', '..');
@@ -220,6 +274,9 @@ class Updater {
       for (const e of fs.readdirSync(nested)) fs.renameSync(path.join(nested, e), path.join(newDir, e));
       fs.rmdirSync(nested);
     }
+    // 关键：把当前版本的账号 ID / 配置 / 聊天记录迁移进新目录，保证更新后数据不变。
+    // 必须在 apply 之前做（此刻旧目录还在运行、可读）。
+    migrateUserData(root, newDir, (m) => this.log(m));
     try { fs.unlinkSync(tmp); } catch { /* ignore */ }
     return newDir;
   }

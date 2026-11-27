@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { buildZip, parseZip, jsonFrom, makeManifest, checkManifest, BACKUP_FORMAT, SCHEMA } from './backup.js';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { PeerLink } from './p2p.js';
@@ -331,6 +332,9 @@ export class Bridge {
       case 'diag-pack': return this._diagPack();
       case 'storage-info': return this._storageInfo();
       case 'set-storage': return this._setStorage(p);
+      case 'backup-info': return this._backupInfo();
+      case 'backup-export': return this._exportBackup(p);
+      case 'backup-import': return this._importBackup(p);
       default: throw new Error(`未知操作：${name}`);
     }
   }
@@ -347,6 +351,224 @@ export class Bridge {
       configDataDir: cfg.storage?.dataDir ?? '',
       configDownloadsDir: cfg.storage?.downloadsDir ?? ''
     };
+  }
+
+  // ---------- 数据备份：导出 / 导入（聊天记录 + 配置，跨版本兼容） ----------
+  /** 备份格式信息（前端展示用） */
+  _backupInfo() {
+    const chats = this.store.listChats();
+    return {
+      format: BACKUP_FORMAT,
+      schema: SCHEMA,
+      chats: chats.length,
+      messages: chats.reduce((n, c) => n + (c.count || 0), 0),
+      friends: (this.local.friends || []).length,
+      groups: (this.local.groups || []).length,
+      outFiles: this.outFiles?.size ?? 0,
+      dataDir: this.store.dataDir,
+      downloadsDir: this.downloadsDir
+    };
+  }
+
+  /**
+   * 导出全部数据为标准 zip 备份包。
+   * 落盘到接收文件目录（用户可见），同时返回 base64（供前端直接下载/另存）。
+   * 返回 { file, where, size, base64, counts, schema }
+   */
+  _exportBackup() {
+    const entries = [];
+    // 1) 归一化配置（PC 的 settings 就是中立结构，直接用）
+    const contacts = {
+      profile: this.local.profile ?? null,
+      friends: Array.isArray(this.local.friends) ? this.local.friends : [],
+      groups: Array.isArray(this.local.groups) ? this.local.groups : [],
+      settings: this.local.settings ?? {}
+    };
+    // 2) 已读 / 撤回 / 下载登记
+    const readMarks = Object.fromEntries(this.readMarks);
+    const recalled = {};
+    for (const [k, s] of this.recalled) if (s?.size) recalled[k] = [...s];
+    const downloadsDone = Object.fromEntries(this.downloadsDone);
+    // 3) 消息：每个会话一个 jsonl（原样拷贝，避免解析丢失字段）
+    const msgDir = path.join(this.store.dataDir, 'messages');
+    let msgCount = 0, chatCount = 0;
+    if (fs.existsSync(msgDir)) {
+      for (const f of fs.readdirSync(msgDir)) {
+        if (!/^[pg]\d+\.jsonl$/.test(f)) continue;
+        const buf = fs.readFileSync(path.join(msgDir, f));
+        entries.push({ name: `messages/${f}`, data: buf });
+        chatCount++;
+        msgCount += buf.toString('utf8').split('\n').filter((l) => l.trim()).length;
+      }
+    }
+    // 4) 发出文件：登记 + 文件本体
+    const reg = Object.fromEntries(this.outFiles ?? new Map());
+    let fileBytes = 0;
+    for (const fid of Object.keys(reg)) {
+      const fp = path.join(this.filesDir, fid);
+      if (fs.existsSync(fp)) {
+        const buf = fs.readFileSync(fp);
+        entries.push({ name: `files/${fid}`, data: buf });
+        fileBytes += buf.length;
+      }
+    }
+    const appVersion = (() => { try { return JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')).version; } catch { return ''; } })();
+    const manifest = makeManifest({
+      source: 'pc', appVersion,
+      counts: { messages: msgCount, chats: chatCount, friends: contacts.friends.length, groups: contacts.groups.length, files: Object.keys(reg).length, bytes: fileBytes }
+    });
+    // manifest + 配置类文件放前面，便于未来版本快速读取
+    const head = [
+      { name: 'manifest.json', data: Buffer.from(JSON.stringify(manifest, null, 1)) },
+      { name: 'data/contacts.json', data: Buffer.from(JSON.stringify(contacts, null, 1)) },
+      { name: 'data/read-marks.json', data: Buffer.from(JSON.stringify(readMarks, null, 1)) },
+      { name: 'data/recalled.json', data: Buffer.from(JSON.stringify(recalled, null, 1)) },
+      { name: 'data/downloads-done.json', data: Buffer.from(JSON.stringify(downloadsDone, null, 1)) },
+      { name: 'files/registry.json', data: Buffer.from(JSON.stringify(reg, null, 1)) }
+    ];
+    const zip = buildZip([...head, ...entries]);
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const name = `arktalk-backup-${stamp}.zip`;
+    let file = '', where = '';
+    try {
+      file = path.join(this.downloadsDir, name);
+      fs.writeFileSync(file, zip);
+      where = `下载/ArkTalk/${name}`;
+    } catch (e) {
+      this.log(`备份落盘失败（仍返回 base64）：${e.message}`, 'warn');
+      file = '';
+    }
+    return {
+      file, where, size: zip.length,
+      base64: zip.toString('base64'),
+      counts: manifest.counts, schema: SCHEMA, format: BACKUP_FORMAT
+    };
+  }
+
+  /**
+   * 导入备份包。base64 为标准 zip 内容（与 _exportBackup 对应）。
+   * 策略=合并（幂等）：消息按 message_id 去重追加；联系人/群按 id 合并；
+   * 已读取较新时间戳；撤回合并；下载登记合并；配置仅在本地为空时采用 profile。
+   * 返回 { ok, warn, imported:{...}, skipped }
+   */
+  _importBackup({ base64, policy = 'merge' } = {}) {
+    if (!base64) throw new Error('备份内容为空');
+    let buf;
+    try { buf = Buffer.from(String(base64), 'base64'); } catch { throw new Error('备份内容解码失败'); }
+    if (buf.length < 22) throw new Error('备份文件过小');
+    let map;
+    try { map = parseZip(buf); } catch (e) { throw new Error(`备份包解析失败：${e.message}`); }
+    const { warn } = checkManifest(jsonFrom(map, 'manifest.json', null));
+    const imported = { messages: 0, chats: 0, friends: 0, groups: 0, files: 0 };
+    let skipped = 0;
+
+    // --- 消息：逐会话 append（store 内部按 message_id 去重 → 幂等）---
+    const msgDir = path.join(this.store.dataDir, 'messages');
+    fs.mkdirSync(msgDir, { recursive: true });
+    for (const [name, raw] of map) {
+      const m = /^messages\/([pg]\d+\.jsonl)$/.exec(name);
+      if (!m) continue;
+      const chatKey = m[1].replace(/\.jsonl$/, '');
+      let added = 0;
+      for (const line of raw.toString('utf8').split('\n')) {
+        const t = line.trim();
+        if (!t) continue;
+        try {
+          const rec = JSON.parse(t);
+          if (!rec?.message_id) { skipped++; continue; }
+          if (this.store.append(chatKey, rec)) added++; else skipped++;
+        } catch { skipped++; }
+      }
+      if (added) { imported.chats++; imported.messages += added; }
+    }
+
+    // --- 配置 ---
+    const contacts = jsonFrom(map, 'data/contacts.json', {});
+    if (contacts && typeof contacts === 'object') {
+      // profile：默认仅当本地没有时才采用（避免覆盖当前设备身份）；
+      // 显式 replaceProfile=true 时用备份身份替换（换设备/迁移场景）。
+      if (contacts.profile?.accountId && (policy === 'replace-profile' || !this.local.profile?.accountId)) {
+        const oldId = this.local.profile?.accountId;
+        this.local.profile = contacts.profile;
+        if (oldId && String(oldId) !== String(contacts.profile.accountId)) {
+          // 身份变了：需要让 P2P 内核用新 ID 重连
+          try { this.link.selfId = contacts.profile.accountId; } catch { /* 忽略 */ }
+        }
+      }
+      const mergeById = (dst, src, key) => {
+        const have = new Set((dst || []).map((x) => String(x?.[key])));
+        for (const item of (Array.isArray(src) ? src : [])) {
+          if (!item || typeof item !== 'object') continue;
+          const id = String(item[key] ?? '');
+          if (!id || have.has(id)) { skipped++; continue; }
+          have.add(id); dst.push(item);
+          if (key === 'user_id') imported.friends++; else imported.groups++;
+        }
+      };
+      if (!Array.isArray(this.local.friends)) this.local.friends = [];
+      if (!Array.isArray(this.local.groups)) this.local.groups = [];
+      mergeById(this.local.friends, contacts.friends, 'user_id');
+      mergeById(this.local.groups, contacts.groups, 'group_id');
+      // settings：令牌合并去重
+      const s = contacts.settings ?? {};
+      if (!this.local.settings) this.local.settings = {};
+      const toks = Array.isArray(s.openp2pTokens) ? s.openp2pTokens : [];
+      const myToks = Array.isArray(this.local.settings.openp2pTokens) ? this.local.settings.openp2pTokens : [];
+      const seen = new Set(myToks.map((t) => t?.token));
+      for (const t of toks) if (t?.token && !seen.has(t.token)) { seen.add(t.token); myToks.push(t); }
+      this.local.settings.openp2pTokens = myToks;
+      if (!this.local.settings.openp2pToken && s.openp2pToken) this.local.settings.openp2pToken = s.openp2pToken;
+      this._saveLocal();
+    }
+
+    // --- 已读：取较新 ---
+    const marks = jsonFrom(map, 'data/read-marks.json', {});
+    if (marks && typeof marks === 'object') {
+      for (const [k, v] of Object.entries(marks)) {
+        const ts = Number(v);
+        if (Number.isFinite(ts) && ts > (this.readMarks.get(k) ?? 0)) this.readMarks.set(k, ts);
+      }
+      this._saveReadMarks();
+    }
+
+    // --- 撤回：并集 ---
+    const rec = jsonFrom(map, 'data/recalled.json', {});
+    if (rec && typeof rec === 'object') {
+      for (const [k, arr] of Object.entries(rec)) {
+        if (!Array.isArray(arr)) continue;
+        if (!this.recalled.has(k)) this.recalled.set(k, new Set());
+        const set = this.recalled.get(k);
+        for (const id of arr) if (id) set.add(String(id));
+      }
+      this._saveRecalled();
+    }
+
+    // --- 下载登记：并集（本地优先，不覆盖已有的完整路径）---
+    const dl = jsonFrom(map, 'data/downloads-done.json', {});
+    if (dl && typeof dl === 'object') {
+      for (const [k, v] of Object.entries(dl)) {
+        if (v && typeof v === 'object' && !this.downloadsDone.has(k)) this.downloadsDone.set(k, v);
+      }
+      this._saveDownloadsDone();
+    }
+
+    // --- 文件本体：补缺失的 ---
+    const reg = jsonFrom(map, 'files/registry.json', {});
+    if (reg && typeof reg === 'object') {
+      fs.mkdirSync(this.filesDir, { recursive: true });
+      for (const fid of Object.keys(reg)) {
+        const data = map.get(`files/${fid}`);
+        if (!data) continue;
+        const fp = path.join(this.filesDir, fid);
+        if (!fs.existsSync(fp)) { fs.writeFileSync(fp, data); imported.files++; }
+      }
+      // 合并登记
+      for (const [fid, meta] of Object.entries(reg)) if (!this.outFiles.has(fid)) this.outFiles.set(fid, meta);
+      this._saveOutRegistry();
+    }
+
+    this.log(`备份导入完成：${imported.messages} 条消息 / ${imported.friends} 联系人 / ${imported.files} 文件${warn ? '（' + warn + '）' : ''}`, 'info');
+    return { ok: true, warn, imported, skipped, schema: jsonFrom(map, 'manifest.json', {}).schema ?? null };
   }
 
   /**

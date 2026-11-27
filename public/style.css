@@ -362,6 +362,16 @@ body { font: 14px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; color: var(--te
 .storage-line span { color: var(--text-sub); flex: none; }
 .storage-line code { font: 11px/1.5 ui-monospace, Consolas, monospace; color: var(--text); word-break: break-all; text-align: right; }
 
+/* ---------- 数据备份（聊天记录 + 配置，两端通用） ---------- */
+.backup-box { border: 1px solid var(--border, #e0e4ea); border-radius: 8px; padding: 10px 12px; margin-top: 6px; }
+.backup-stat { font-size: 12px; color: var(--text-sub); line-height: 1.6; }
+.backup-stat b { color: var(--text); font-weight: 600; }
+.backup-msg { font-size: 12px; margin-top: 8px; line-height: 1.5; word-break: break-all; }
+.backup-msg.ok { color: #1a9c5b; }
+.backup-msg.err { color: #e04b4b; }
+.backup-check { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-sub); margin-top: 8px; }
+.backup-check input { width: auto; }
+
 /* ---------- 图片 / 音频 / 文件卡片 ---------- */
 .bubble img.image-seg { -webkit-tap-highlight-color: transparent; -webkit-user-select: none; user-select: none; outline: none; }
 .file-name { min-width: 0; word-break: break-all; }

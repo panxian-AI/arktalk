@@ -931,6 +931,18 @@ function openProfileModal(pendingAvatar) {
       </div>
       <div class="pf-hint">更改后会把已有数据复制到新目录并重启应用；原目录保留不删除。</div>
     </div>` : ''}
+    <div class="modal-sub">数据备份（聊天记录 + 配置，可迁移到其他设备）</div>
+    <div class="backup-box" id="pf-backup-box">
+      <div class="backup-stat" id="pf-backup-stat">读取中…</div>
+      <div class="update-actions">
+        <button class="mini primary" id="pf-backup-export">导出备份</button>
+        <button class="mini" id="pf-backup-import">导入备份</button>
+      </div>
+      <label class="backup-check"><input type="checkbox" id="pf-backup-replace"> 导入时用备份里的账号身份替换本机（换设备时勾选）</label>
+      <div class="pf-hint">导出的 .zip 含全部聊天记录、联系人、令牌设置和已发送的文件，未来版本也能导入。导入采用「合并」方式，不会删除现有消息；重复导入不会产生重复内容。</div>
+      <div class="backup-msg" id="pf-backup-msg" hidden></div>
+      <input type="file" id="pf-backup-file" accept=".zip,application/zip" hidden>
+    </div>
     <div class="modal-sub">软件更新（只有被标记为「正式稳定版」的版本才会提示）</div>
     <div class="update-box" id="pf-update-box">
       <div class="update-line"><span id="pf-update-status">检查中…</span><button class="mini" id="pf-update-check">重新检查</button></div>
@@ -1184,6 +1196,73 @@ function openProfileModal(pendingAvatar) {
     }
   };
   initStorage();
+
+  // ---------- 数据备份（两端通用）：导出 / 导入 ----------
+  const backupMsg = (text, kind = '') => {
+    const el = $('pf-backup-msg');
+    if (!el) return;
+    el.textContent = text; el.hidden = !text;
+    el.className = 'backup-msg' + (kind ? ' ' + kind : '');
+  };
+  const initBackup = async () => {
+    const stat = $('pf-backup-stat');
+    if (!stat) return;
+    try {
+      const info = await rpc('backup-info');
+      stat.innerHTML = `当前：<b>${info.messages || 0}</b> 条消息 · <b>${info.chats || 0}</b> 个会话 · <b>${info.friends || 0}</b> 联系人 · <b>${info.files || 0}</b> 个文件`;
+    } catch (e) { stat.textContent = `读取失败：${e.message}`; }
+
+    $('pf-backup-export').onclick = async () => {
+      const btn = $('pf-backup-export');
+      btn.disabled = true; btn.textContent = '导出中…'; backupMsg('');
+      try {
+        const r = await rpc('backup-export');
+        if (!r?.base64) throw new Error(r?.error || '导出失败');
+        // 触发浏览器/网页下载
+        const bin = atob(r.base64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const blob = new Blob([bytes], { type: 'application/zip' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        a.href = url; a.download = `arktalk-backup-${stamp}.zip`;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+        const extra = r.where ? `，也已保存到 ${r.where}` : (r.file ? `，也已保存到 ${r.file}` : '');
+        backupMsg(`✅ 已导出 ${r.counts?.messages || 0} 条消息 / ${r.counts?.files || 0} 个文件${extra}`, 'ok');
+      } catch (e) { backupMsg(`导出失败：${e.message}`, 'err'); }
+      btn.disabled = false; btn.textContent = '导出备份';
+    };
+
+    const fileInput = $('pf-backup-file');
+    $('pf-backup-import').onclick = () => fileInput.click();
+    fileInput.onchange = async () => {
+      const f = fileInput.files?.[0];
+      if (!f) return;
+      fileInput.value = '';
+      const replace = !!$('pf-backup-replace')?.checked;
+      backupMsg('正在导入…');
+      try {
+        const base64 = await new Promise((resolve, reject) => {
+          const fr = new FileReader();
+          fr.onload = () => {
+            const s = String(fr.result || '');
+            resolve(s.slice(s.indexOf(',') + 1)); // 去掉 data: 前缀
+          };
+          fr.onerror = () => reject(new Error('读取文件失败'));
+          fr.readAsDataURL(f);
+        });
+        const r = await rpc('backup-import', { base64, policy: replace ? 'replace-profile' : 'merge' });
+        if (!r?.ok) throw new Error(r?.error || '导入失败');
+        const im = r.imported || {};
+        const warn = r.warn ? `\n⚠️ ${r.warn}` : '';
+        backupMsg(`✅ 导入完成：${im.messages || 0} 条消息 / ${im.friends || 0} 联系人 / ${im.groups || 0} 群 / ${im.files || 0} 个文件（重复 ${r.skipped || 0} 条已跳过）${warn}\n请关闭并重新打开设置或刷新界面以查看新数据。`, 'ok');
+        if (typeof loadHistory === 'function') { /* 历史在打开会话时按会话拉取 */ }
+      } catch (e) { backupMsg(`导入失败：${e.message}`, 'err'); }
+    };
+  };
+  initBackup();
 
   setTimeout(() => $('pf-nick').focus(), 0);
 };
