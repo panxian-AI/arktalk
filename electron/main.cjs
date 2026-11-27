@@ -41,6 +41,7 @@ let isQuitting = false;      // 真正退出（而不是收进托盘）
 let trayTipShown = false;    // 首次最小化到托盘的气泡只弹一次
 let statusTimer = null;
 let updater = null;          // 自动更新器（app ready 后实例化）
+let updateInfo = null;       // 启动自动检查的结果（有新版本时托盘/菜单提示）
 
 function bridgeUp() {
   return new Promise((resolve) => {
@@ -319,6 +320,17 @@ function toggleWindow() {
 /** 托盘菜单：每次状态变化重建（Electron 的菜单项不能直接改，只能替换整体）。 */
 function buildTrayMenu(status) {
   const lines = [];
+  if (updateInfo?.available && !updateInfo.skipped) {
+    lines.push({
+      label: `🆕 有新版本 ${updateInfo.current} → ${updateInfo.latest}，点击更新`,
+      toolTip: updateInfo.notes || '点击打开更新窗口',
+      click: () => {
+        showWindow();
+        setTimeout(() => { if (win && !win.isDestroyed()) win.webContents.send('ark:open-update'); }, 250);
+      }
+    });
+    lines.push({ type: 'separator' });
+  }
   if (status) {
     const who = status.nickname ? `${status.nickname}（${status.selfId}）` : (status.selfId ?? '未登录');
     lines.push({ label: `账号：${who}`, enabled: false });
@@ -400,6 +412,29 @@ async function refreshTray(force = false) {
   return status;
 }
 
+/** 启动后自动检查一次正式更新（多线路测速，失败静默，不打扰用户）。 */
+async function autoCheckUpdateOnBoot() {
+  if (!app.isPackaged) return;
+  try {
+    if (!updater) updater = new Updater(app, _updLog);
+    const r = await updater.check();
+    if (r.error) return;
+    updateInfo = r;
+    if (r.available && !r.skipped) {
+      _updLog(`发现新版本 ${r.current} → ${r.latest}（来源 ${r.source || '?'}）`);
+      await refreshTray();
+      if (tray && !tray.isDestroyed() && tray.displayBalloon) {
+        try {
+          tray.displayBalloon({
+            title: 'ArkTalk 有新版本',
+            content: `${r.current} → ${r.latest}，点托盘菜单更新${r.notes ? '。' + r.notes.slice(0, 40) : ''}`
+          });
+        } catch { /* 气泡不可用时忽略 */ }
+      }
+    }
+  } catch (e) { _updLog('启动检查更新失败（已忽略）：' + e.message); }
+}
+
 function createTray() {
   const iconPath = path.join(app.getAppPath(), 'assets', 'icon.ico');
   let img = nativeImage.createFromPath(iconPath);
@@ -443,6 +478,8 @@ if (!app.requestSingleInstanceLock()) {
     await ensureBridge();
     createWindow();
     createTray();
+    // 启动 8 秒后自动查一次正式更新（不阻塞启动；多线路测速 + 硬超时，失败静默）
+    setTimeout(() => { autoCheckUpdateOnBoot().catch(() => {}); }, 8000);
   }).catch((e) => {
     // 没窗口可弹的场景（比如桥没起来）只能写日志
     console.error(`[ArkTalk] 启动失败：`, e.message);

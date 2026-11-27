@@ -182,6 +182,18 @@ body { font: 14px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; color: var(--te
 .ci-row { display: flex; gap: 6px; }
 .ci-row input { flex: 1; min-width: 0; font-size: 12px; }
 .ci-row .mini { flex: none; }
+/* 多令牌管理 */
+.token-list { display: flex; flex-direction: column; gap: 6px; margin: 6px 0; }
+.token-item { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px; background: rgba(127,127,127,.05); font-size: 12px; }
+.token-item.active { border-color: var(--brand, #4a90e2); background: rgba(74,144,226,.08); }
+.token-item .tk-name { font-weight: 600; flex: none; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.token-item .tk-masked { color: var(--text-sub); font: 11px ui-monospace, Consolas, monospace; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.token-item .tk-badge { color: var(--brand, #4a90e2); font-size: 10px; flex: none; }
+.token-item .mini { flex: none; padding: 3px 7px; }
+.token-add { display: flex; gap: 6px; }
+.token-add input { min-width: 0; flex: 1; font-size: 12px; }
+.token-add input.tk-name-input { flex: 0 0 84px; }
+.token-add .mini { flex: none; }
 .mini:disabled { opacity: .6; cursor: not-allowed; }
 .cg-members { max-height: 180px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; padding: 4px; }
 .cg-member { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; }

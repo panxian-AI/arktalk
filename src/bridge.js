@@ -320,6 +320,10 @@ export class Bridge {
       case 'open-location': return this._openLocation(p);
       case 'peers': return { peers: this.link.onlineMap() };
       case 'set-openp2p-token': return this._setOpenP2pToken(p);
+      case 'list-tokens': return this._listTokens();
+      case 'add-token': return this._addToken(p);
+      case 'switch-token': return this._switchToken(p);
+      case 'remove-token': return this._removeToken(p);
       case 'relay-status': return {
         tokenSet: !!this.local.settings?.openp2pToken,
         ...this.openp2p.info()
@@ -808,6 +812,61 @@ export class Bridge {
     this._refreshRelay();
     this.log(t ? '跨网穿透已启用' : '跨网穿透已停用', 'info');
     return { enabled: !!t };
+  }
+
+  // ---------- 多令牌管理（保存多个 OpenP2P 令牌，随时切换当前使用的那个）----------
+  _tokens() {
+    if (!this.local.settings) this.local.settings = {};
+    if (!Array.isArray(this.local.settings.openp2pTokens)) this.local.settings.openp2pTokens = [];
+    return this.local.settings.openp2pTokens;
+  }
+  _maskToken(t) {
+    const s = String(t ?? '');
+    return s.length <= 8 ? '••••' : s.slice(0, 3) + '••••' + s.slice(-3);
+  }
+  _listTokens() {
+    const list = this._tokens();
+    const active = this.local.settings?.openp2pToken ?? '';
+    return {
+      activeId: list.find((x) => x.token === active)?.id ?? '',
+      tokens: list.map((x) => ({ id: x.id, name: x.name || '未命名', masked: this._maskToken(x.token), active: x.token === active }))
+    };
+  }
+  _addToken({ name, token } = {}) {
+    const t = String(token ?? '').trim();
+    if (!t) throw new Error('令牌不能为空');
+    const list = this._tokens();
+    if (list.some((x) => x.token === t)) throw new Error('这个令牌已经保存过了');
+    const item = { id: `tk_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`, name: String(name ?? '').trim() || `令牌 ${list.length + 1}`, token: t };
+    list.push(item);
+    // 第一个令牌自动启用
+    if (!this.local.settings.openp2pToken) this.local.settings.openp2pToken = t;
+    this._saveLocal();
+    if (this.local.settings.openp2pToken === t) this._refreshRelay();
+    return this._listTokens();
+  }
+  _switchToken({ id } = {}) {
+    const list = this._tokens();
+    const item = list.find((x) => x.id === id);
+    if (!item) throw new Error('找不到这个令牌');
+    this.local.settings.openp2pToken = item.token;
+    this._saveLocal();
+    this._refreshRelay();
+    this.log(`已切换到令牌：${item.name}`, 'info');
+    return this._listTokens();
+  }
+  _removeToken({ id } = {}) {
+    const list = this._tokens();
+    const idx = list.findIndex((x) => x.id === id);
+    if (idx < 0) throw new Error('找不到这个令牌');
+    const wasActive = list[idx].token === this.local.settings.openp2pToken;
+    list.splice(idx, 1);
+    if (wasActive) {
+      this.local.settings.openp2pToken = list.length ? list[0].token : '';
+    }
+    this._saveLocal();
+    this._refreshRelay();
+    return this._listTokens();
   }
 
   // ---------- 本机数据（账号/联系人/群，全部留在本机） ----------

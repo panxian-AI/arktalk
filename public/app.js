@@ -904,10 +904,14 @@ function openProfileModal(pendingAvatar) {
       <input id="pf-ci" readonly value="${esc(myConnInfo())}">
       <button class="mini" id="pf-copy">复制</button>
     </div>
-    <div class="modal-sub">跨网穿透（不在同一 WiFi/流量也能连）——到 console.openp2p.cn 注册后复制令牌，两台设备填同一个</div>
-    <div class="form-row ci-row">
-      <input id="pf-op2p" placeholder="${uiCfg?.op2pTokenSet ? '已启用（输入新令牌可更换）' : 'OpenP2P 令牌（选填）'}" autocomplete="off">
-      <button class="mini" id="pf-op2p-save">保存</button>
+    <div class="modal-sub">跨网穿透令牌（不在同一 WiFi/流量也能连）——可保存多个令牌随时切换，两台设备填同一个令牌才能互通</div>
+    <div class="token-box">
+      <div class="token-list" id="pf-token-list"><div class="pf-hint">读取中…</div></div>
+      <div class="token-add">
+        <input id="pf-token-name" class="tk-name-input" placeholder="备注名" maxlength="16">
+        <input id="pf-token-value" placeholder="粘贴 OpenP2P 令牌" autocomplete="off">
+        <button class="mini" id="pf-token-add">添加</button>
+      </div>
     </div>
     <div class="op2p-diag">
       <div class="diag-head"><span id="pf-op2p-dot" class="on-dot off"></span><span id="pf-op2p-status">穿透状态：读取中…</span><button class="mini" id="pf-op2p-diag">诊断包</button><button class="mini" id="pf-op2p-refresh">刷新</button></div>
@@ -943,19 +947,55 @@ function openProfileModal(pendingAvatar) {
     <div class="modal-actions"><button class="ghost" id="pf-cancel">取消</button><button id="pf-ok">保存</button></div>`);
   $('pf-cancel').onclick = closeModal;
   $('pf-avatar-btn').onclick = () => $('pf-avatar-input').click();
-  $('pf-op2p-save').onclick = async () => {
-    const t = $('pf-op2p').value.trim();
-    if (!t) return;
+  // 多令牌管理：列表 + 添加 + 切换 + 删除
+  const renderTokens = async () => {
+    const box = $('pf-token-list');
+    if (!box) return;
     try {
-      await rpc('set-openp2p-token', { token: t });
-      $('pf-op2p').value = '';
-      $('pf-op2p-save').textContent = '已启用';
-      uiCfg.op2pTokenSet = true;
-      setTimeout(refreshRelayStatus, 1200);
-      setTimeout(refreshRelayStatus, 6000);
-    } catch { $('pf-op2p-save').textContent = '失败'; }
-    setTimeout(() => { const b = $('pf-op2p-save'); if (b) b.textContent = '保存'; }, 2500);
+      const r = await rpc('list-tokens');
+      const list = Array.isArray(r.tokens) ? r.tokens : [];
+      if (!list.length) {
+        box.innerHTML = '<div class="pf-hint">还没有保存令牌。在下方粘贴令牌并起个备注名即可添加。</div>';
+        return;
+      }
+      box.innerHTML = list.map((t) => `<div class="token-item ${t.active ? 'active' : ''}" data-id="${esc(t.id)}">
+        <span class="tk-name" title="${esc(t.name)}">${esc(t.name)}</span>
+        <span class="tk-masked">${esc(t.masked)}</span>
+        ${t.active ? '<span class="tk-badge">使用中</span>' : `<button class="mini tk-use">启用</button>`}
+        <button class="mini tk-del" title="删除">✕</button>
+      </div>`).join('');
+      box.querySelectorAll('.token-item').forEach((el) => {
+        const id = el.dataset.id;
+        const use = el.querySelector('.tk-use');
+        if (use) use.onclick = async () => {
+          use.disabled = true;
+          try { await rpc('switch-token', { id }); await renderTokens(); uiCfg.op2pTokenSet = true; setTimeout(refreshRelayStatus, 1500); setTimeout(refreshRelayStatus, 6000); }
+          catch (e) { use.disabled = false; alert('切换失败：' + e.message); }
+        };
+        const del = el.querySelector('.tk-del');
+        if (del) del.onclick = async () => {
+          if (!confirm('确定删除这个令牌？')) return;
+          try { await rpc('remove-token', { id }); await renderTokens(); setTimeout(refreshRelayStatus, 1200); }
+          catch (e) { alert('删除失败：' + e.message); }
+        };
+      });
+    } catch (e) { box.innerHTML = `<div class="pf-hint">读取失败：${esc(e.message)}</div>`; }
   };
+  $('pf-token-add').onclick = async () => {
+    const name = $('pf-token-name').value.trim();
+    const token = $('pf-token-value').value.trim();
+    if (!token) { alert('请先粘贴令牌'); return; }
+    const btn = $('pf-token-add');
+    btn.disabled = true; btn.textContent = '添加中…';
+    try {
+      await rpc('add-token', { name, token });
+      $('pf-token-name').value = ''; $('pf-token-value').value = '';
+      await renderTokens(); uiCfg.op2pTokenSet = true;
+      setTimeout(refreshRelayStatus, 1500); setTimeout(refreshRelayStatus, 6000);
+    } catch (e) { alert('添加失败：' + e.message); }
+    btn.disabled = false; btn.textContent = '添加';
+  };
+  renderTokens();
   $('pf-copy').onclick = () => copyText(myConnInfo()).then((ok) => {
     $('pf-copy').textContent = ok ? '已复制' : '复制失败';
     setTimeout(() => { const b = $('pf-copy'); if (b) b.textContent = '复制'; }, 2000);
@@ -1062,7 +1102,7 @@ function openProfileModal(pendingAvatar) {
       if (r.error) { st.textContent = `检查失败：${r.error}`; return; }
       if (r.dev) { st.textContent = '当前为开发模式（发行版才有自动更新）'; return; }
       if (r.available && !r.skipped) {
-        st.textContent = `✅ 有正式更新：${r.current} → ${r.latest}${r.published ? `（${r.published}）` : ''}`;
+        st.textContent = `✅ 有正式更新：${r.current} → ${r.latest}${r.published ? `（${r.published}）` : ''}${r.source ? ` · 线路 ${r.source}` : ''}`;
         const notes = $('pf-update-notes');
         if (r.notes) { notes.textContent = r.notes; notes.hidden = false; }
         $('pf-update-actions').hidden = false;
