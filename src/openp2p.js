@@ -27,6 +27,24 @@ export class OpenP2PManager {
     this.proc = null;
     this.relayMap = {}; // friendId -> '127.0.0.1:port'
     this._stoppedByUs = false;
+    this.lines = [];      // 最近若干行输出（诊断用）
+    this.status = '未启用'; // 给人看的一句话状态
+    this.node = '';
+  }
+
+  /** 诊断视图：进程是否在跑、节点名、最近输出。 */
+  info() {
+    return {
+      running: !!this.proc,
+      node: this.node,
+      status: this.proc ? (this.status || '运行中') : this.status,
+      log: this.lines.slice(-14)
+    };
+  }
+
+  _note(s) {
+    this.status = s;
+    this.log(`OpenP2P：${s}`, 'warn');
   }
 
   /** 为空/无 exe/无联系人时直接返回空映射。 */
@@ -35,9 +53,13 @@ export class OpenP2PManager {
     this.stop();
     this.relayMap = {};
     const ids = [...new Set(friendIds.map(String))].filter(Boolean);
-    if (!token || !ids.length) return this.relayMap;
+    this.node = `arktalk-${selfId}`;
+    if (!token || !ids.length) {
+      this.status = !token ? '未设置令牌' : '没有联系人（无需隧道）';
+      return this.relayMap;
+    }
     if (!fs.existsSync(this.exePath)) {
-      this.log(`OpenP2P：找不到 ${this.exePath}，穿透未启用`, 'warn');
+      this._note(`找不到穿透程序 ${this.exePath}`);
       return this.relayMap;
     }
     fs.mkdirSync(this.workDir, { recursive: true });
@@ -45,7 +67,7 @@ export class OpenP2PManager {
     // 令牌超出 JS 安全整数，不能用 Number——用占位符把数字原样写进 JSON。
     const tokenStr = String(token).trim();
     if (!/^\d{1,20}$/.test(tokenStr)) {
-      this.log('OpenP2P：令牌无效——必须是 console.openp2p.cn 个人资料里那串数字', 'warn');
+      this._note('令牌无效——必须是 console.openp2p.cn 个人资料里那串数字');
       return this.relayMap;
     }
     const apps = ids.map((id, i) => ({
@@ -79,14 +101,16 @@ export class OpenP2PManager {
         { cwd: this.workDir, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
       this.proc.stdout?.on('data', (d) => this._pump(d, 'info'));
       this.proc.stderr?.on('data', (d) => this._pump(d, 'warn'));
+      this.status = '穿透进程启动中（等待登录）';
       // error 事件必须接住：spawn 失败（权限/文件缺失等）不能把整个桥进程崩掉
       this.proc.on('error', (e) => {
         this.proc = null;
-        this.log(`OpenP2P 启动失败：${e.message}（Windows 下通常因官方程序要求管理员权限，已自动注册免提权标记，重启应用即可）`, 'warn');
+        this._note(`启动失败：${e.message}（Windows 下通常因官方程序要求管理员权限，已自动注册免提权标记，重启应用即可）`);
       });
       this.proc.on('exit', (code) => {
+        const wasOurs = this._stoppedByUs;
         this.proc = null;
-        if (!this._stoppedByUs) this.log(`OpenP2P 进程退出（code=${code}）`, 'warn');
+        if (!wasOurs) this._note(`进程退出（code=${code}）`);
       });
     } catch (e) {
       this.log(`OpenP2P 启动失败：${e.message}`, 'warn');
@@ -110,12 +134,27 @@ export class OpenP2PManager {
   stop() {
     this._stoppedByUs = true;
     if (this.proc) { try { this.proc.kill(); } catch { /* ignore */ } this.proc = null; }
+    this.status = '未运行';
   }
 
   _pump(buf, level) {
     for (const line of String(buf).split(/\r?\n/)) {
       const t = line.trim();
-      if (t) this.log(`OpenP2P｜${t.slice(0, 200)}`, level);
+      if (!t) continue;
+      this.lines.push(t.slice(0, 200));
+      if (this.lines.length > 60) this.lines.splice(0, this.lines.length - 60);
+      // 从输出里提炼一句话状态（登录成功 / 对端在线状态）
+      if (/login ok/i.test(t)) {
+        const m = t.match(/user=([^,\s]+)[,\s]+node=([^\s,]+)/i);
+        this.status = `已登录${m ? `（${m[1]}）` : ''}，节点 ${this.node}`;
+      } else if (/peer online|peerOnline/i.test(t)) {
+        this.status = '对端节点已上线，隧道已接通';
+      } else if (/peer offline/i.test(t) && this.status.includes('已登录')) {
+        this.status = '已登录，但对端节点离线（对方穿透未运行）';
+      } else if (/login fail|token.*(invalid|error)|userNotFound/i.test(t)) {
+        this._note(`登录失败：${t.slice(0, 120)}`);
+      }
+      this.log(`OpenP2P｜${t.slice(0, 200)}`, level);
     }
   }
 }

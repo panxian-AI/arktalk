@@ -24,6 +24,21 @@
       "RelayNode": "",
       "ForceRelay": 0,
       "Enabled": 1
+    },
+    {
+      "AppName": "arktalk-f621923494",
+      "Protocol": "tcp",
+      "UnderlayProtocol": "",
+      "PunchPriority": 0,
+      "Whitelist": "",
+      "SrcPort": 13101,
+      "PeerNode": "arktalk-621923494",
+      "DstPort": 3021,
+      "DstHost": "localhost",
+      "PeerUser": "",
+      "RelayNode": "",
+      "ForceRelay": 0,
+      "Enabled": 1
     }
   ],
   "LogLevel": 1,

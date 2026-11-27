@@ -707,6 +707,10 @@ $('rail-avatar').onclick = () => {
       <input id="pf-op2p" placeholder="${uiCfg?.op2pTokenSet ? '已启用（输入新令牌可更换）' : 'OpenP2P 令牌（选填）'}" autocomplete="off">
       <button class="mini" id="pf-op2p-save">保存</button>
     </div>
+    <div class="op2p-diag">
+      <div class="diag-head"><span id="pf-op2p-dot" class="on-dot off"></span><span id="pf-op2p-status">穿透状态：读取中…</span><button class="mini" id="pf-op2p-refresh">刷新</button></div>
+      <pre class="diag-log" id="pf-op2p-log"></pre>
+    </div>
     <div class="form-err" id="pf-err" hidden></div>
     <div class="modal-actions"><button class="ghost" id="pf-cancel">取消</button><button id="pf-ok">保存</button></div>`);
   $('pf-cancel').onclick = closeModal;
@@ -719,6 +723,8 @@ $('rail-avatar').onclick = () => {
       $('pf-op2p').value = '';
       $('pf-op2p-save').textContent = '已启用';
       uiCfg.op2pTokenSet = true;
+      setTimeout(refreshRelayStatus, 1200);
+      setTimeout(refreshRelayStatus, 6000);
     } catch { $('pf-op2p-save').textContent = '失败'; }
     setTimeout(() => { const b = $('pf-op2p-save'); if (b) b.textContent = '保存'; }, 2500);
   };
@@ -726,6 +732,25 @@ $('rail-avatar').onclick = () => {
     $('pf-copy').textContent = ok ? '已复制' : '复制失败';
     setTimeout(() => { const b = $('pf-copy'); if (b) b.textContent = '复制'; }, 2000);
   });
+  // 穿透状态自检：显示进程是否在跑 / 登录是否成功 / 最近输出
+  const refreshRelayStatus = async () => {
+    const st = $('pf-op2p-status');
+    if (!st) return;
+    try {
+      const r = await rpc('relay-status');
+      const dot = $('pf-op2p-dot');
+      const ok = !!r.running;
+      dot.className = `on-dot ${ok ? 'on' : 'off'}`;
+      st.textContent = `${ok ? '✅' : '⚠️'} ${r.status || (r.tokenSet ? '未知' : '未设置令牌')}｜节点 ${r.node || '-'}`;
+      const logEl = $('pf-op2p-log');
+      const lines = Array.isArray(r.log) ? r.log : [];
+      logEl.textContent = lines.length ? lines.slice(-12).join('\n') : '（暂无输出）';
+    } catch (e) {
+      st.textContent = `⚠️ 读取失败：${e.message}`;
+    }
+  };
+  refreshRelayStatus();
+  $('pf-op2p-refresh').onclick = refreshRelayStatus;
   $('pf-avatar-input').addEventListener('change', () => {
     const file = $('pf-avatar-input').files[0];
     if (file) shrinkImage(file, 128).then((u) => { $('pf-avatar').src = u; }).catch(() => {});

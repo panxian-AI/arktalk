@@ -165,6 +165,11 @@ body { font: 14px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; color: var(--te
 .profile-row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
 .profile-row .avatar { width: 56px; height: 56px; }
 .pf-hint { font-size: 12px; color: var(--text-sub); margin-top: 6px; }
+/* 穿透状态自检面板 */
+.op2p-diag { margin-top: 8px; border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; background: rgba(127,127,127,.05); }
+.op2p-diag .diag-head { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-sub); }
+.op2p-diag .diag-head .mini { margin-left: auto; }
+.op2p-diag .diag-log { margin: 6px 0 0; max-height: 108px; overflow: auto; font: 11px/1.45 ui-monospace, Consolas, monospace; color: var(--text-sub); white-space: pre-wrap; word-break: break-all; }
 .mini { border: 0; padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 12px; background: var(--hover); }
 .mini.primary { background: var(--accent); color: #fff; }
 .mini:disabled { opacity: .6; cursor: not-allowed; }

@@ -83,6 +83,7 @@ export class Bridge {
     this._peersTimer = setInterval(() => {
       this._broadcast({ type: 'peers', peers: this.link.onlineMap() });
     }, 20000);
+    this._watchRelay(); // 穿透进程守护（崩溃/被杀自动拉起）
 
     // P2P 事件 → 落本机 + 广播界面
     this.link.on('message', (m) => this._onPeerMessage(m));
@@ -129,6 +130,7 @@ export class Bridge {
 
   stop() {
     clearInterval(this._peersTimer);
+    clearInterval(this._relayTimer);
     this.openp2p.stop();
     for (const ws of this.uiSockets) { try { ws.close(1001, 'server stop'); } catch { /* ignore */ } }
     this._wss?.close();
@@ -245,6 +247,10 @@ export class Bridge {
       case 'download-file': return this._downloadFile(p);
       case 'peers': return { peers: this.link.onlineMap() };
       case 'set-openp2p-token': return this._setOpenP2pToken(p);
+      case 'relay-status': return {
+        tokenSet: !!this.local.settings?.openp2pToken,
+        ...this.openp2p.info()
+      };
       default: throw new Error(`未知操作：${name}`);
     }
   }
@@ -578,6 +584,14 @@ export class Bridge {
     const ids = this.local.friends.map((f) => String(f.user_id));
     const relayMap = this.openp2p.start(token, this.local.profile.accountId, ids);
     for (const [id, addr] of Object.entries(relayMap)) this.link.setEndpoint(id, addr);
+  }
+
+  /** 穿透进程守护：异常退出（被安全软件杀、网络切换崩溃）后 30 秒内自动重启。 */
+  _watchRelay() {
+    this._relayTimer = setInterval(() => {
+      if (!this.local.settings?.openp2pToken) return;
+      if (!this.openp2p.proc) this._refreshRelay();
+    }, 30000);
   }
 
   _setOpenP2pToken({ token } = {}) {
