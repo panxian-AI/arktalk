@@ -120,7 +120,7 @@ async function main() {
   uiB = new WebSocket(`ws://127.0.0.1:${B.listen.port}/ws?token=${B.uiToken}`);
   uiB.on('message', (raw) => framesB.push(JSON.parse(String(raw))));
   await new Promise((r) => uiB.on('open', r));
-  await sleep(3500); // A 自动重连（2s 退避）+ 补发
+  await sleep(7000); // A 自动重连（5s 退避）+ 补发
   check('B 重启后离线消息自动补发', B.store.read(`p${A.local.profile.accountId}`, 10).some((x) => x.message?.[0]?.data?.text === '离线补发'));
 
   // 8) 非法输入校验

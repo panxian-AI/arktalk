@@ -20,6 +20,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { PeerLink } from './p2p.js';
+import { OpenP2PManager } from './openp2p.js';
 import { chatKeyOf, previewOf } from './message-util.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -50,6 +51,12 @@ export class Bridge {
       this._saveLocal();
     }
     this.link = new PeerLink({ selfId: this.local.profile.accountId, listen: p2p, log });
+    // 跨网穿透（OpenP2P，可选）：联系人里每个账号建一条 127.0.0.1:131xx → 对方 3021 的隧道
+    this.openp2p = new OpenP2PManager({
+      exePath: path.join(__dirname, '..', 'bin', 'openp2p.exe'),
+      workDir: path.join(this.store.dataDir, 'openp2p'),
+      log
+    });
     // 文件传输：outFiles = 我发出去的（对方来拉）；downloads = 我正在收的
     this.filesDir = path.join(this.store.dataDir, 'files');
     this.downloadsDir = path.join(this.store.dataDir, 'downloads');
@@ -70,6 +77,8 @@ export class Bridge {
     for (const f of this.local.friends) {
       if (f.endpoint) this.link.setEndpoint(f.user_id, f.endpoint);
     }
+    // 穿透隧道（填了 OpenP2P 令牌才有）：为每个联系人加 127.0.0.1 隧道地址
+    this._refreshRelay();
     // 心跳自检：每 20 秒把「哪些账号当前能直连」广播给界面（列表绿/灰点实时刷新）
     this._peersTimer = setInterval(() => {
       this._broadcast({ type: 'peers', peers: this.link.onlineMap() });
@@ -120,6 +129,7 @@ export class Bridge {
 
   stop() {
     clearInterval(this._peersTimer);
+    this.openp2p.stop();
     for (const ws of this.uiSockets) { try { ws.close(1001, 'server stop'); } catch { /* ignore */ } }
     this._wss?.close();
     this._server?.close();
@@ -146,7 +156,8 @@ export class Bridge {
         uiToken: this.uiToken,
         selfId: this.local.profile.accountId,
         p2pPort: this.p2pCfg.port,
-        lanAddrs: this.lanAddrs()   // 本机所有局域网 IPv4（供“复制连接信息”用）
+        lanAddrs: this.lanAddrs(),   // 本机所有局域网 IPv4（供“复制连接信息”用）
+        op2pTokenSet: !!this.local.settings?.openp2pToken // 跨网穿透是否已启用
       }));
       return;
     }
@@ -233,6 +244,7 @@ export class Bridge {
       case 'send-file': return await this._sendFile(p);
       case 'download-file': return this._downloadFile(p);
       case 'peers': return { peers: this.link.onlineMap() };
+      case 'set-openp2p-token': return this._setOpenP2pToken(p);
       default: throw new Error(`未知操作：${name}`);
     }
   }
@@ -266,6 +278,7 @@ export class Bridge {
     }
     this._saveLocal();
     this._broadcastHello();
+    this._refreshRelay(); // 联系人变化 → 重建 OpenP2P 隧道（新增账号也走跨网）
     return { added: true, user_id: uid };
   }
 
@@ -279,6 +292,7 @@ export class Bridge {
     }
     this._saveLocal();
     this._broadcastHello();
+    this._refreshRelay();
     return { removed: before !== this.local.friends.length };
   }
 
@@ -556,6 +570,26 @@ export class Bridge {
     return { results, failed: results.filter((r) => !r.ok).length };
   }
 
+  // ---------- 跨网穿透（OpenP2P，可选） ----------
+  /** 令牌变化或联系人变化后重建隧道：每个联系人一条 127.0.0.1:131xx → 对方 3021。 */
+  _refreshRelay() {
+    const token = this.local.settings?.openp2pToken;
+    if (!token) { this.openp2p.stop(); return; }
+    const ids = this.local.friends.map((f) => String(f.user_id));
+    const relayMap = this.openp2p.start(token, this.local.profile.accountId, ids);
+    for (const [id, addr] of Object.entries(relayMap)) this.link.setEndpoint(id, addr);
+  }
+
+  _setOpenP2pToken({ token } = {}) {
+    const t = String(token ?? '').trim();
+    if (!this.local.settings) this.local.settings = {};
+    this.local.settings.openp2pToken = t;
+    this._saveLocal();
+    this._refreshRelay();
+    this.log(t ? '跨网穿透已启用' : '跨网穿透已停用', 'info');
+    return { enabled: !!t };
+  }
+
   // ---------- 本机数据（账号/联系人/群，全部留在本机） ----------
   _localPath() { return path.join(this.store.dataDir, 'contacts.json'); }
   _loadLocal() {
@@ -564,16 +598,18 @@ export class Bridge {
       this.local = {
         profile: j.profile ?? null,
         friends: Array.isArray(j.localFriends) ? j.localFriends : [],
-        groups: Array.isArray(j.localGroups) ? j.localGroups : []
+        groups: Array.isArray(j.localGroups) ? j.localGroups : [],
+        settings: j.settings ?? {}
       };
-    } catch { this.local = { profile: null, friends: [], groups: [] }; }
+    } catch { this.local = { profile: null, friends: [], groups: [], settings: {} }; }
   }
   _saveLocal() {
     try {
       fs.writeFileSync(this._localPath(), JSON.stringify({
         profile: this.local.profile,
         localFriends: this.local.friends,
-        localGroups: this.local.groups
+        localGroups: this.local.groups,
+        settings: this.local.settings ?? {}
       }, null, 1));
     } catch (e) { this.log(`本机数据保存失败：${e.message}`, 'warn'); }
   }

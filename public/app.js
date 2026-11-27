@@ -693,10 +693,26 @@ $('rail-avatar').onclick = () => {
       <input id="pf-ci" readonly value="${esc(myConnInfo())}">
       <button class="mini" id="pf-copy">复制</button>
     </div>
+    <div class="modal-sub">跨网穿透（不在同一 WiFi/流量也能连）——到 console.openp2p.cn 注册后复制令牌，两台设备填同一个</div>
+    <div class="form-row ci-row">
+      <input id="pf-op2p" placeholder="${uiCfg?.op2pTokenSet ? '已启用（输入新令牌可更换）' : 'OpenP2P 令牌（选填）'}" autocomplete="off">
+      <button class="mini" id="pf-op2p-save">保存</button>
+    </div>
     <div class="form-err" id="pf-err" hidden></div>
     <div class="modal-actions"><button class="ghost" id="pf-cancel">取消</button><button id="pf-ok">保存</button></div>`);
   $('pf-cancel').onclick = closeModal;
   $('pf-avatar-btn').onclick = () => $('pf-avatar-input').click();
+  $('pf-op2p-save').onclick = async () => {
+    const t = $('pf-op2p').value.trim();
+    if (!t) return;
+    try {
+      await rpc('set-openp2p-token', { token: t });
+      $('pf-op2p').value = '';
+      $('pf-op2p-save').textContent = '已启用';
+      uiCfg.op2pTokenSet = true;
+    } catch { $('pf-op2p-save').textContent = '失败'; }
+    setTimeout(() => { const b = $('pf-op2p-save'); if (b) b.textContent = '保存'; }, 2500);
+  };
   $('pf-copy').onclick = () => copyText(myConnInfo()).then((ok) => {
     $('pf-copy').textContent = ok ? '已复制' : '复制失败';
     setTimeout(() => { const b = $('pf-copy'); if (b) b.textContent = '复制'; }, 2000);

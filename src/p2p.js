@@ -44,6 +44,8 @@ export class PeerLink {
     this._server = null;
     this._listeners = new Map();
     this._stopped = false;
+    this._sweep = null;          // 周期补拨定时器
+    this._ping = null;           // 保活探测定时器
   }
 
   on(ev, fn) { (this._listeners.get(ev) ?? this._listeners.set(ev, new Set()).get(ev)).add(fn); return this; }
@@ -52,6 +54,19 @@ export class PeerLink {
   start() {
     this._stopped = false;
     this._server = new WebSocketServer({ host: this.listen.host, port: this.listen.port });
+    // 周期自愈：每 10s 扫一遍已知地址，没连上的自动补拨——对方后上线也能自动恢复在线
+    this._sweep = setInterval(() => {
+      if (this._stopped) return;
+      for (const id of this.endpoints.keys()) {
+        if (!this.peers.has(id) && !this._out.has(id)) this._dial(id);
+      }
+    }, 10000);
+    // 保活探测：每 20s ping 一遍所有连接，半开连接会出错关闭并触发重连
+    this._ping = setInterval(() => {
+      for (const ws of new Set([...this.peers.values(), ...this._out.values()])) {
+        if (ws.readyState === 1) { try { ws.ping(); } catch { /* close 会跟着来 */ } }
+      }
+    }, 20000);
     return new Promise((resolve, reject) => {
       this._server.once('error', (err) => {
         if (err?.code === 'EADDRINUSE') reject(new Error(`P2P 端口 ${this.listen.port} 已被占用，改 config.json p2p.port`));
@@ -67,6 +82,7 @@ export class PeerLink {
 
   stop() {
     this._stopped = true;
+    clearInterval(this._sweep); clearInterval(this._ping);
     for (const t of this._retry.values()) clearTimeout(t);
     this._retry.clear();
     for (const ws of new Set([...this.peers.values(), ...this._out.values()])) { try { ws.close(1001, 'bye'); } catch { /* ignore */ } }
@@ -120,7 +136,7 @@ export class PeerLink {
     }
     const q = this.outbox.get(id) ?? this.outbox.set(id, []).get(id);
     q.push(envelope);
-    if (!this._out.has(id) && this.endpoints.has(id)) this._dial(id);
+    if (!this.peers.has(id) && !this._out.has(id) && this.endpoints.has(id)) this._dial(id);
     return { queued: true, envelope };
   }
 
@@ -228,8 +244,9 @@ export class PeerLink {
     ws.on('error', () => { /* close 会跟着来 */ });
   }
 
-  /** 学习到的对端地址（入站来源 IP + 对端 P2P 端口）。已存在则不重复。 */
+  /** 学习到的对端地址（入站来源 IP + 对端 P2P 端口）。已存在则不重复。回环地址（OpenP2P 隧道来源）不学。 */
   _learnEndpoint(peerId, ip) {
+    if (/^127\.|^::1$/.test(ip)) return null;
     const cur = this.endpoints.get(peerId) ?? [];
     const knownPort = cur.map((a) => a.split(':').pop()).find((p) => /^\d+$/.test(p));
     const cand = `${ip}:${knownPort ?? 3021}`;
@@ -290,6 +307,14 @@ export class PeerLink {
       ws.on('error', (e) => {
         if (!opened) this.log(`连接 ${ep} 失败：${e.message}（将轮换地址重试）`, 'warn');
       });
+      // 拨号失败/未完成 hello：必须清掉出站占位并安排重试，
+      // 否则死连接残留在 _out 里会堵死 setEndpoint/send/sweep 的所有重拨入口
+      ws.on('close', () => {
+        if (!ws._peerId && this._out.get(accountId) === ws) {
+          this._out.delete(accountId);
+          this._scheduleRetry(accountId);
+        }
+      });
       this._setup(ws, 'outbound');
     } catch (e) {
       this.log(`连接 ${ep} 失败：${e.message}`, 'warn');
@@ -302,7 +327,7 @@ export class PeerLink {
     const t = setTimeout(() => {
       this._retry.delete(accountId);
       if (!this.peers.has(accountId)) this._dial(accountId);
-    }, 2000);
+    }, 5000);
     this._retry.set(accountId, t);
   }
 }
