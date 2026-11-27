@@ -744,7 +744,9 @@ $('rail-avatar').onclick = () => {
       st.textContent = `${ok ? '✅' : '⚠️'} ${r.status || (r.tokenSet ? '未知' : '未设置令牌')}｜节点 ${r.node || '-'}`;
       const logEl = $('pf-op2p-log');
       const lines = Array.isArray(r.log) ? r.log : [];
-      logEl.textContent = lines.length ? lines.slice(-12).join('\n') : '（暂无输出）';
+      const crash = (r.crash || '').trim();
+      logEl.textContent = (lines.length ? lines.slice(-10).join('\n') : '（暂无输出）')
+        + (crash ? `\n— 上次崩溃 —\n${crash.slice(-600)}` : '');
     } catch (e) {
       st.textContent = `⚠️ 读取失败：${e.message}`;
     }
