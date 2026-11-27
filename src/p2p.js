@@ -37,7 +37,8 @@ export class PeerLink {
     this.log = log;
     this.peers = new Map();      // accountId -> ws（当前在线的直连）
     this.outbox = new Map();     // accountId -> [envelope]（未 ack 的排队消息）
-    this.endpoints = new Map();  // accountId -> 'host:port'（要主动连的对端地址）
+    this.endpoints = new Map();  // accountId -> ['host:port', ...]（要主动连的对端地址，可多个轮换）
+    this._epIdx = new Map();     // accountId -> 上次拨号用到的地址下标（失败轮换）
     this._out = new Map();       // accountId -> ws（出站连接，可能与 peers 里同一条）
     this._retry = new Map();     // accountId -> timer
     this._server = null;
@@ -56,7 +57,7 @@ export class PeerLink {
         if (err?.code === 'EADDRINUSE') reject(new Error(`P2P 端口 ${this.listen.port} 已被占用，改 config.json p2p.port`));
         else reject(err);
       });
-      this._server.on('connection', (ws) => this._setup(ws, 'inbound'));
+      this._server.on('connection', (ws, req) => this._setup(ws, 'inbound', req));
       this._server.on('listening', () => {
         this.log(`P2P 内核：监听 ${this.listen.host}:${this.listen.port}`);
         resolve();
@@ -73,15 +74,31 @@ export class PeerLink {
     return new Promise((r) => this._server?.close(() => r()));
   }
 
-  /** 登记/更新对端地址，并（若未连）发起出站连接 + 周期重试。 */
+  /**
+   * 登记/更新对端地址，并（若未连）发起出站连接 + 周期重试。
+   * endpoint 支持多个地址（逗号/空格分隔），拨号失败自动轮换下一个——
+   * 适配网络环境变化（换 WiFi、DHCP 换 IP，对方多网卡等）。
+   * @returns {boolean} 是否新增了地址
+   */
   setEndpoint(accountId, endpoint) {
     const id = String(accountId);
-    const ep = String(endpoint ?? '').trim();
-    if (!ep) return;
-    const norm = ep.includes(':') ? ep : `${ep}:${3021}`;
-    if (this.endpoints.get(id) === norm) return;
-    this.endpoints.set(id, norm);
+    const list = String(endpoint ?? '')
+      .split(/[\s,;，；]+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((s) => (/^\d{1,3}(\.\d{1,3}){3}:?\d*$|^\[[0-9a-f:]+\](:\d+)?$/.test(s) || s.includes(':')
+        ? (s.includes(':') ? s : `${s}:3021`)
+        : `${s}:3021`));
+    if (!list.length) return false;
+    const cur = this.endpoints.get(id) ?? [];
+    let added = false;
+    for (const a of list) {
+      if (!cur.includes(a)) { cur.push(a); added = true; }
+    }
+    if (!added) return false;
+    this.endpoints.set(id, cur);
     if (!this.peers.has(id) && !this._out.has(id)) this._dial(id);
+    return true;
   }
 
   /** 当前是否与某账号直连在线。 */
@@ -127,9 +144,13 @@ export class PeerLink {
   }
 
   // ---------- 内部 ----------
-  _setup(ws, side) {
+  _setup(ws, side, req) {
     ws._side = side;
     ws._peerId = null;
+    // 入站连接记录来源 IP：对方换网后自动更新地址（带事件通知上层落盘）
+    if (req?.socket?.remoteAddress) {
+      ws._remoteIp = String(req.socket.remoteAddress).replace(/^::ffff:/, '');
+    }
     ws.on('message', (raw) => {
       let f;
       try { f = JSON.parse(String(raw)); } catch { return; }
@@ -138,6 +159,11 @@ export class PeerLink {
         case 'hello': {
           ws._peerId = String(f.accountId ?? '');
           if (!ws._peerId || ws._peerId === this.selfId) { ws.close(4002, 'bad hello'); return; }
+          // 自动学习：对方连进来时记住它的 最新 IP（换网不用重新填地址）
+          if (side === 'inbound' && ws._remoteIp) {
+            const learned = this._learnEndpoint(ws._peerId, ws._remoteIp);
+            if (learned) this.emit('endpoint-learned', { accountId: ws._peerId, endpoint: learned });
+          }
           // 同账号多连接仲裁：保留"由较小 accountId 一方发起"的连接（确定性，避免双向拨号互顶）
           const old = this.peers.get(ws._peerId);
           if (old && old !== ws && old.readyState === 1) {
@@ -202,6 +228,17 @@ export class PeerLink {
     ws.on('error', () => { /* close 会跟着来 */ });
   }
 
+  /** 学习到的对端地址（入站来源 IP + 对端 P2P 端口）。已存在则不重复。 */
+  _learnEndpoint(peerId, ip) {
+    const cur = this.endpoints.get(peerId) ?? [];
+    const knownPort = cur.map((a) => a.split(':').pop()).find((p) => /^\d+$/.test(p));
+    const cand = `${ip}:${knownPort ?? 3021}`;
+    if (cur.includes(cand)) return null;
+    cur.unshift(cand); // 最新地址排最前，优先拨
+    this.endpoints.set(peerId, cur);
+    return cand;
+  }
+
   /** 双连接仲裁：保留由较小 accountId 一方发起的连接。clientOf = 该连接的发起方 id。 */
   _preferKeep(newWs, oldWs, peerId) {
     const clientOf = (w) => (w._side === 'outbound' ? String(this.selfId) : peerId);
@@ -238,12 +275,21 @@ export class PeerLink {
   }
 
   _dial(accountId) {
-    const ep = this.endpoints.get(accountId);
-    if (!ep || this._stopped) return;
+    const list = this.endpoints.get(accountId);
+    if (!list?.length || this._stopped) return;
+    // 多地址轮换：每次拨号用下一个地址（网络环境变化时自动适应）
+    const idx = (this._epIdx.get(accountId) ?? 0) % list.length;
+    this._epIdx.set(accountId, idx + 1);
+    const ep = list[idx];
+    this.log(`拨号 ${accountId} → ${ep}（地址 ${idx + 1}/${list.length}）`, 'info');
     try {
-      const ws = new WebSocket(`ws://${ep}`);
+      const ws = new WebSocket(`ws://${ep}`, { handshakeTimeout: 6000 });
       this._out.set(accountId, ws);
-      ws.on('open', () => ws.send(JSON.stringify({ v: PROTO, type: 'hello', accountId: this.selfId })));
+      let opened = false;
+      ws.on('open', () => { opened = true; ws.send(JSON.stringify({ v: PROTO, type: 'hello', accountId: this.selfId })); });
+      ws.on('error', (e) => {
+        if (!opened) this.log(`连接 ${ep} 失败：${e.message}（将轮换地址重试）`, 'warn');
+      });
       this._setup(ws, 'outbound');
     } catch (e) {
       this.log(`连接 ${ep} 失败：${e.message}`, 'warn');

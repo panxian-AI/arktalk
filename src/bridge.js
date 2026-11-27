@@ -15,6 +15,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
@@ -68,6 +69,17 @@ export class Bridge {
     // P2P 事件 → 落本机 + 广播界面
     this.link.on('message', (m) => this._onPeerMessage(m));
     this.link.on('profile', (p) => this._onPeerProfile(p));
+    // 对方换网后连进来 → 自动把它的最新 IP 记进联系人（网络环境变化免手填）
+    this.link.on('endpoint-learned', ({ accountId, endpoint }) => {
+      const f = this.local.friends.find((x) => Number(x.user_id) === Number(accountId));
+      if (!f) return;
+      const cur = String(f.endpoint ?? '').split(/[\s,;，；]+/).filter(Boolean);
+      if (cur.includes(endpoint)) return;
+      f.endpoint = [endpoint, ...cur].join(',');
+      this._saveLocal();
+      this._broadcastHello();
+      this.log(`自动更新 ${accountId} 的地址 → ${endpoint}`, 'info');
+    });
     this.link.on('fileframe', ({ from, frame }) => this._onFileFrame(from, frame));
     this.link.on('peer-online', (id) => {
       this.link.pushProfile(id, this.local.profile); // 对方上线即互报资料
@@ -105,11 +117,27 @@ export class Bridge {
   }
 
   // ---------- HTTP ----------
+  /** 本机所有局域网 IPv4（排除回环；VirtualBox/虚拟网卡等也列出，由对方按连通性轮换）。 */
+  lanAddrs() {
+    const out = [];
+    for (const addrs of Object.values(os.networkInterfaces())) {
+      for (const a of addrs ?? []) {
+        if (a.family === 'IPv4' && !a.internal && a.address) out.push(a.address);
+      }
+    }
+    return out;
+  }
+
   _onHttp(req, res) {
     const url = new URL(req.url, 'http://x');
     if (url.pathname === '/api/config') {
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ uiToken: this.uiToken, selfId: this.local.profile.accountId, p2pPort: this.p2pCfg.port }));
+      res.end(JSON.stringify({
+        uiToken: this.uiToken,
+        selfId: this.local.profile.accountId,
+        p2pPort: this.p2pCfg.port,
+        lanAddrs: this.lanAddrs()   // 本机所有局域网 IPv4（供“复制连接信息”用）
+      }));
       return;
     }
     if (url.pathname === '/api/upload' && req.method === 'POST') {

@@ -170,3 +170,68 @@ body { font: 14px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; color: var(--te
 .cg-member { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; }
 .cg-member:hover { background: var(--hover); }
 .cg-member .avatar { width: 26px; height: 26px; }
+
+/* 连接信息行：输入框 + 复制/粘贴按钮并排 */
+.ci-row { display: flex; gap: 6px; }
+.ci-row input { flex: 1; min-width: 0; font-size: 12px; }
+.ci-row .mini { flex: none; }
+.mini:disabled { opacity: .6; cursor: not-allowed; }
+.cg-members { max-height: 180px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; padding: 4px; }
+.cg-member { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.cg-member:hover { background: var(--hover); }
+.cg-member .avatar { width: 26px; height: 26px; }
+
+/* ==================== 手机/触屏适配 ==================== */
+#btn-back { display: none; border: 0; background: none; color: var(--text); font-size: 28px; line-height: 1; padding: 4px 12px 4px 4px; cursor: pointer; flex: none; }
+#btn-back:active { opacity: .6; }
+
+@media (max-width: 760px) {
+  /* 返回按钮只在小屏显示 */
+  #btn-back { display: block; }
+
+  /* 侧栏导航条收窄但按钮加大（44px 触屏标准） */
+  #rail { width: 50px; padding: 10px 0 12px; }
+  .rail-btn { width: 44px; height: 44px; font-size: 19px; }
+  #rail-logo, .rail-avatar { width: 36px; height: 36px; }
+
+  /* 列表/聊天整屏切换：默认列表占满，mobile-chat 时聊天占满 */
+  body:not(.mobile-chat) #chat-pane { display: none !important; }
+  body.mobile-chat #rail, body.mobile-chat #sidebar { display: none !important; }
+  #sidebar { flex: 1; width: auto; min-width: 0; }
+  #app { width: 100%; height: 100vh; }
+
+  /* 列表项加大 */
+  .item { padding: 12px 14px; }
+  .item .avatar { width: 46px; height: 46px; }
+  .item .name { font-size: 15px; }
+  #search { padding: 11px 14px; font-size: 15px; }
+  #btn-add { width: 38px; height: 38px; font-size: 20px; }
+
+  /* 聊天区 */
+  #chat-header { padding: 10px 12px; }
+  #chat-header .avatar { width: 40px; height: 40px; }
+  #chat-name { font-size: 16px; }
+  #messages { padding: 12px 12px; }
+  .row { max-width: 86%; }
+  .row .avatar { width: 36px; height: 36px; }
+  .bubble { font-size: 15px; }
+  .sender { font-size: 12px; }
+
+  /* 引用按钮：触屏没有 hover，改为常显并放到气泡下方、加大热区 */
+  .msg-quote-btn { position: static; opacity: 1 !important; margin: 4px 0 0 2px; font-size: 12px; padding: 5px 12px; }
+  .row.mine .msg-quote-btn { left: auto; }
+
+  /* 小屏不显示右侧成员面板（聊天区太窄），成员数仍在标题里 */
+  #chat-pane.with-panel { grid-template-columns: 1fr; }
+  #member-panel { display: none !important; }
+
+  /* 输入区加大 */
+  #composer { padding: 8px 10px 10px; }
+  #toolbar button { width: 44px; height: 44px; font-size: 19px; }
+  #input { padding: 10px 12px; font-size: 15px; min-height: 44px; }
+  #btn-send { padding: 10px 18px; font-size: 15px; }
+  #pending-segs .seg-chip { font-size: 13px; padding: 6px 10px; }
+
+  /* 弹窗类在手机上不要太小 */
+  .modal, .dialog, [class*="modal"] { max-width: 92vw; }
+}

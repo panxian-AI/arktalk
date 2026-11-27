@@ -251,6 +251,7 @@ async function openChat(key) {
   activeChat = { key, type: isGroup ? 'group' : 'private', id: key.slice(1), name: meta.name, avatar: meta.avatar };
   $('chat-empty').hidden = true;
   $('chat-pane').hidden = false;
+  document.body.classList.add('mobile-chat'); // 手机端：进入会话后聊天区占满整屏
   $('chat-name').textContent = meta.name;
   $('chat-avatar').src = meta.avatar;
   if (isGroup) {
@@ -268,8 +269,18 @@ async function openChat(key) {
   chats.forEach((c) => { if (c.chatKey === key) c.unread = 0; });
   renderList();
   send({ type: 'history', chatKey: key, limit: 50 });
-  $('input').focus();
+  // 触屏设备不自动弹软键盘（点输入框再弹）
+  if (!window.matchMedia('(pointer: coarse)').matches) $('input').focus();
 }
+// 手机端返回列表（桌面端按钮隐藏，点了也没副作用）
+function exitChatToMobileList() {
+  document.body.classList.remove('mobile-chat');
+  activeChat = null;
+  $('chat-pane').hidden = true;
+  $('chat-empty').hidden = false;
+}
+const _btnBack = $('btn-back');
+if (_btnBack) _btnBack.addEventListener('click', exitChatToMobileList);
 function memberName(gid, uid) {
   const list = groupMembers.get(gid) ?? groupMemberList(gid);
   const m = list.find((x) => String(x.user_id) === String(uid));
@@ -637,10 +648,19 @@ $('rail-avatar').onclick = () => {
       </div>
     </div>
     <div class="form-row"><input id="pf-nick" placeholder="昵称" value="${esc(selfInfo?.nickname ?? '')}" maxlength="30"></div>
+    <div class="modal-sub">我的连接信息（复制后发给对方，对方粘贴即可添加我）</div>
+    <div class="form-row ci-row">
+      <input id="pf-ci" readonly value="${esc(myConnInfo())}">
+      <button class="mini" id="pf-copy">复制</button>
+    </div>
     <div class="form-err" id="pf-err" hidden></div>
     <div class="modal-actions"><button class="ghost" id="pf-cancel">取消</button><button id="pf-ok">保存</button></div>`);
   $('pf-cancel').onclick = closeModal;
   $('pf-avatar-btn').onclick = () => $('pf-avatar-input').click();
+  $('pf-copy').onclick = () => copyText(myConnInfo()).then((ok) => {
+    $('pf-copy').textContent = ok ? '已复制' : '复制失败';
+    setTimeout(() => { const b = $('pf-copy'); if (b) b.textContent = '复制'; }, 2000);
+  });
   $('pf-avatar-input').addEventListener('change', () => {
     const file = $('pf-avatar-input').files[0];
     if (file) shrinkImage(file, 128).then((u) => { $('pf-avatar').src = u; }).catch(() => {});
@@ -659,25 +679,35 @@ $('rail-avatar').onclick = () => {
   setTimeout(() => $('pf-nick').focus(), 0);
 };
 
-/* 联系人弹窗：手动添加（对方账号 + 连接地址） */
+/* 联系人弹窗：手动添加（对方账号 + 连接地址），支持粘贴对方发来的连接信息 */
 function openFriendsModal() {
   modalMode = 'friends';
   openModal(`<div class="modal-title">添加联系人</div>
-    <div class="form-row"><input id="af-uid" placeholder="对方账号（数字）" inputmode="numeric"></div>
+    <div class="form-row ci-row">
+      <input id="af-uid" placeholder="对方账号或粘贴连接信息（账号@地址）" inputmode="text">
+      <button class="mini" id="af-paste" title="从剪贴板粘贴连接信息">粘贴</button>
+    </div>
     <div class="form-row"><input id="af-remark" placeholder="备注（可选）"></div>
-    <div class="form-row"><input id="af-endpoint" placeholder="对方连接地址（可选，如 192.168.1.5:3021）"></div>
-    <div class="pf-hint">留空地址时消息会排队；对方地址拿到后可随时补填。同一局域网内填"IP:3021"即可直连。</div>
+    <div class="form-row"><input id="af-endpoint" placeholder="对方连接地址（可选，多个用逗号分隔）"></div>
+    <div class="pf-hint">连接信息形如 772592327@192.168.1.5:3021 —— 让对方在「我的账号」里复制发给你。地址可填多个（换网自动轮换）；对方连上来后其最新地址也会自动记录。留空地址时消息会排队。</div>
     <div class="form-err" id="af-err" hidden></div>
     <div class="modal-actions">
       <button class="ghost" id="af-cancel">关闭</button>
       <button id="af-ok">添加</button>
     </div>`);
   $('af-cancel').onclick = closeModal;
+  $('af-paste').onclick = async () => {
+    let text = '';
+    try { text = await navigator.clipboard.readText(); } catch { /* WebView 可能禁读剪贴板 */ }
+    if (!text) { $('af-uid').focus(); return; } // 读不到就让用户长按输入框自己粘
+    applyConnInfo(text.trim());
+  };
   $('af-ok').onclick = async () => {
     const err = $('af-err');
     err.hidden = true;
     $('af-ok').disabled = true;
     try {
+      applyConnInfo($('af-uid').value.trim()); // 输入框里直接粘了"账号@地址"也能自动拆
       const res = await rpc('add-friend', {
         userId: $('af-uid').value.trim(),
         remark: $('af-remark').value.trim(),
@@ -690,6 +720,45 @@ function openFriendsModal() {
     $('af-ok').disabled = false;
   };
   setTimeout(() => $('af-uid').focus(), 0);
+}
+
+/** 解析/填充连接信息：'账号@地址1,地址2' / 纯账号 / 纯地址 三种形态。 */
+function applyConnInfo(text) {
+  const t = String(text ?? '').trim();
+  if (!t) return;
+  if (t.includes('@')) {
+    const at = t.indexOf('@');
+    const uid = t.slice(0, at).replace(/\D/g, '');
+    const addrs = t.slice(at + 1).trim();
+    if (uid) $('af-uid').value = uid;
+    if (addrs && !$('af-endpoint').value.trim()) $('af-endpoint').value = addrs;
+  } else if (/^\d+$/.test(t)) {
+    if (!$('af-uid').value.trim()) $('af-uid').value = t;
+  } else if (!$('af-endpoint').value.trim()) {
+    $('af-endpoint').value = t;
+  }
+}
+
+/** 我的连接信息串：账号@IP1:端口,IP2:端口（本机所有局域网 IP，收方按连通性自动轮换） */
+function myConnInfo() {
+  const port = uiCfg?.p2pPort ?? 3021;
+  const ips = Array.isArray(uiCfg?.lanAddrs) ? uiCfg.lanAddrs : [];
+  return `${selfInfo?.accountId ?? ''}@${ips.map((ip) => `${ip}:${port}`).join(',')}`;
+}
+
+/** 写剪贴板（WebView/旧浏览器兜底走 execCommand）。 */
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch { /* fallthrough */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch { return false; }
 }
 
 /* 创建群聊：群名 + 从联系人勾选成员 → 本地群，消息逐成员经 P2P 直发 */
