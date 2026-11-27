@@ -1,7 +1,7 @@
 // ArkTalk 桌面窗口壳（Electron）。
 // 与 QQ 平行：不碰 QQ 进程、不抢登录，只是 SnowLuma 上游的又一个客户端。
 // 职责：拉起（或复用）本地桥 → 开一个独立窗口加载它 → 托盘常驻 → 退出时收好摊。
-const { app, BrowserWindow, session, Tray, Menu, nativeImage, shell, ipcMain, webUtils } = require('electron');
+const { app, BrowserWindow, session, Tray, Menu, nativeImage, shell, ipcMain, webUtils, dialog } = require('electron');
 const { spawn } = require('node:child_process');
 const http = require('node:http');
 const fs = require('node:fs');
@@ -182,6 +182,56 @@ ipcMain.handle('ark:update-rollback', async () => {
     updater.rollbackAndRestart();
     setTimeout(() => { isQuitting = true; app.exit(0); }, 300);
     return { ok: true };
+  } catch (e) { return { ok: false, error: String(e?.message || e) }; }
+});
+
+// ---------- 存储位置：聊天记录(data/) 与 接收文件目录 ----------
+// 主进程负责：选目录 → 停桥 → 复制旧数据 → 写 config.json → 重启。
+// 停桥后再拷，避免边写 JSONL 边复制造成半行；原目录保留不删除。
+ipcMain.handle('ark:storage-choose', async (_e, title = '选择存储目录') => {
+  const r = await dialog.showOpenDialog(win ?? BrowserWindow.getFocusedWindow(), {
+    title,
+    properties: ['openDirectory', 'createDirectory']
+  });
+  return r.canceled ? '' : (r.filePaths[0] || '');
+});
+
+ipcMain.handle('ark:storage-set', async (_e, { dataDir, downloadsDir, migrate = true } = {}) => {
+  try {
+    const root = app.getAppPath();
+    const cfgFile = path.join(root, 'config.json');
+    const cfg = JSON.parse(fs.readFileSync(cfgFile, 'utf8').replace(/^\uFEFF/, ''));
+    const resolve = (p, fallback) => {
+      if (!p || typeof p !== 'string' || !p.trim()) return fallback;
+      const s = p.trim();
+      return path.isAbsolute(s) ? path.normalize(s) : path.resolve(root, s);
+    };
+    const oldData = resolve(cfg.storage?.dataDir, path.join(root, 'data'));
+    const newData = dataDir == null ? oldData : resolve(dataDir, path.join(root, 'data'));
+    if (migrate && path.resolve(newData) !== path.resolve(oldData)) {
+      fs.mkdirSync(newData, { recursive: true });
+      fs.cpSync(oldData, newData, { recursive: true, force: false, errorOnExist: false });
+    }
+    // 尽量写相对路径（解压目录内可移植），外部目录写绝对路径
+    const rel = (p) => {
+      if (!p) return '';
+      const r = path.relative(root, path.resolve(p));
+      return r && !r.startsWith('..') && !path.isAbsolute(r) ? r : path.resolve(p);
+    };
+    const oldDl = cfg.storage?.downloadsDir ?? '';
+    cfg.storage = {
+      ...(cfg.storage ?? {}),
+      dataDir: dataDir == null ? (cfg.storage?.dataDir ?? '') : rel(newData),
+      downloadsDir: downloadsDir == null ? oldDl : (downloadsDir ? rel(resolve(downloadsDir, '')) : '')
+    };
+    fs.writeFileSync(cfgFile, JSON.stringify(cfg, null, 2) + '\n');
+    logCrash('storage-change', new Error(`数据目录 ${oldData} → ${newData}；接收目录 ${oldDl} → ${cfg.storage.downloadsDir}`));
+    // 重启：让桥按新路径重新打开 LocalStore
+    isQuitting = true;
+    if (serverChild) { try { serverChild.kill(); } catch { /* ignore */ } }
+    app.relaunch({ args: process.argv.slice(1) });
+    setTimeout(() => { app.exit(0); }, 300);
+    return { ok: true, dataDir: newData };
   } catch (e) { return { ok: false, error: String(e?.message || e) }; }
 });
 

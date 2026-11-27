@@ -5,15 +5,30 @@
 //   · p2p（默认）：设备间 WS 直连（跨网由内置 OpenP2P 映射）
 //   · snowluma（可选）：SnowLuma 注入本进程/本机后经 OneBot v11 收发——注入即可用
 import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { Bridge } from './bridge.js';
 import { LocalStore } from './store.js';
 import { OneBotClient } from './onebot-client.js';
 import { discoverUpstream } from './discover.js';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const appRoot = path.resolve(__dirname, '..');
+
 function readConfig() {
   const text = fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8').replace(/^\uFEFF/, '');
   return JSON.parse(text);
+}
+
+/**
+ * storage 里的路径：空 = 用默认；相对路径按应用根目录解析；绝对路径原样使用。
+ * 解压即用的发行版里 appRoot 就是 ArkTalk-win64 目录。
+ */
+function resolveStoragePath(p, fallback) {
+  if (!p || typeof p !== 'string' || !p.trim()) return fallback;
+  const s = p.trim();
+  return path.isAbsolute(s) ? path.normalize(s) : path.resolve(appRoot, s);
 }
 
 /** SnowLuma 注入通道（可选）：自发现 token 后连接上游 OneBot。 */
@@ -47,11 +62,13 @@ async function main() {
     console.log(`[${new Date().toLocaleTimeString('zh-CN', { hour12: false })}] [${level}] ${msg}`);
 
   const cfg = readConfig();
-  const dataDir = new URL('../data', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
+  const dataDir = resolveStoragePath(cfg.storage?.dataDir, path.join(appRoot, 'data'));
+  const downloadsDir = resolveStoragePath(cfg.storage?.downloadsDir, '');
   const store = new LocalStore(dataDir, log);
   const ob = await maybeConnectSnowluma(cfg, log);
   const bridge = new Bridge({
     store,
+    downloadsDir,
     listen: cfg.listen,
     p2p: { host: cfg.p2p?.host ?? '0.0.0.0', port: Number(cfg.p2p?.port ?? 3021) },
     ob,
@@ -61,6 +78,8 @@ async function main() {
   await bridge.start();
   ob?.start();
   maybeStartOpenp2p(cfg, log);
+  log(`数据目录：${dataDir}`);
+  log(`接收文件目录：${bridge.downloadsDir}`);
 
   const shutdown = async () => {
     log('正在退出…');

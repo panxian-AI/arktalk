@@ -343,3 +343,43 @@ body { font: 14px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; color: var(--te
 .update-notes { margin-top: 8px; padding: 8px 10px; background: var(--bg2, #f6f8fb); border-radius: 6px;
   font-size: 12px; color: var(--text-sub); line-height: 1.5; }
 .update-actions { display: flex; gap: 8px; margin-top: 10px; }
+
+/* ---------- 存储位置（电脑版） ---------- */
+.storage-box { border: 1px solid var(--border, #e0e4ea); border-radius: 8px; padding: 10px 12px; margin-top: 6px; }
+.storage-line { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; font-size: 13px; margin: 5px 0; }
+.storage-line span { color: var(--text-sub); flex: none; }
+.storage-line code { font: 11px/1.5 ui-monospace, Consolas, monospace; color: var(--text); word-break: break-all; text-align: right; }
+
+/* ---------- 图片 / 音频 / 文件卡片 ---------- */
+.bubble img.image-seg { -webkit-tap-highlight-color: transparent; -webkit-user-select: none; user-select: none; outline: none; }
+.file-name { min-width: 0; word-break: break-all; }
+.file-actions { display: inline-flex; gap: 6px; flex: none; }
+.voice-card { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; -webkit-tap-highlight-color: transparent; user-select: none; outline: none; }
+.voice-card .voice-icon { font-size: 18px; flex: none; }
+.voice-card .voice-label { font-size: 12px; color: var(--text-sub); flex: none; }
+.voice-card audio { width: min(210px, 52vw); height: 34px; max-width: none; }
+
+/* ---------- 手机版 UI 二次打磨（放最后，确保覆盖前面的通用规则） ---------- */
+@media (max-width: 760px) {
+  /* 「原图」按钮：避免被 44px 方按钮规则挤成竖排 */
+  #toolbar #btn-original { width: auto !important; height: 44px; white-space: nowrap;
+    padding: 4px 10px; gap: 5px; font-size: 12px; }
+  #toolbar #btn-original .orig-dot { flex: none; }
+
+  /* 引用/撤回：触屏没有 hover，常显但移到气泡下方，不挤压消息内容 */
+  .row { padding-bottom: 22px; }
+  .msg-quote-btn { position: absolute !important; bottom: 2px; top: auto !important;
+    left: auto; right: 0; opacity: 1 !important; margin: 0 !important;
+    font-size: 11px; padding: 2px 9px; line-height: 1.5; }
+  .row.mine .msg-quote-btn { left: 0; right: auto; }
+  .row.mine .msg-quote-btn.recall-btn { left: 52px; }
+
+  /* 文件卡片：单列排版，长路径单独一行不挤按钮 */
+  .file-card { display: grid; grid-template-columns: 1fr; gap: 6px; max-width: 100%; }
+  .file-actions { justify-content: flex-start; }
+  .file-status { word-break: break-all; }
+  .card-seg { max-width: 100%; }
+
+  /* 语音卡片：播放条不再撑满气泡 */
+  .voice-card audio { width: min(200px, 48vw); }
+}

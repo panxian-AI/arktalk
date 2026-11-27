@@ -30,9 +30,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * 选一个用户真能找到的下载目录：优先「下载/ArkTalk」，不可写就退回数据目录。
  * 之前直接用 data/downloads，文件收完了界面上也不给路径，等于"下不了"。
  */
-function pickDownloadsDir(dataDir) {
+function pickDownloadsDir(dataDir, configured = '') {
   const home = os.homedir();
   const candidates = [
+    configured, // 用户在设置里指定的接收目录，优先级最高
     process.env.USERPROFILE ? path.join(process.env.USERPROFILE, 'Downloads', 'ArkTalk') : null,
     path.join(home, 'Downloads', 'ArkTalk'),
     path.join(dataDir, 'downloads')
@@ -54,9 +55,10 @@ export class Bridge {
    * @param {{host:string,port:string|number}} opts.listen 界面服务监听（只给本机界面）
    * @param {{host:string,port:number}} opts.p2p P2P 内核监听（0.0.0.0 才能接受外部设备）
    * @param {import('./onebot-client.js').OneBotClient|null} [opts.ob] 可选 SnowLuma 注入通道
+   * @param {string} [opts.downloadsDir] 用户在设置里指定的接收文件目录（空 = 自动选）
    * @param {function} [opts.log]
    */
-  constructor({ store, listen, p2p, ob = null, log = () => {} }) {
+  constructor({ store, listen, p2p, ob = null, downloadsDir = '', log = () => {} }) {
     this.store = store;
     this.listen = listen;
     this.p2pCfg = p2p;
@@ -92,8 +94,8 @@ export class Bridge {
     });
     // 文件传输：outFiles = 我发出去的（对方来拉）；downloads = 我正在收的
     this.filesDir = path.join(this.store.dataDir, 'files');
-    // 收到的文件放到用户自己的"下载/ArkTalk"里，不要再埋进 data 目录（用户根本找不到）
-    this.downloadsDir = pickDownloadsDir(this.store.dataDir);
+    // 收到的文件默认放到用户自己的"下载/ArkTalk"里；用户也可在设置里指定任意目录
+    this.downloadsDir = pickDownloadsDir(this.store.dataDir, downloadsDir);
     fs.mkdirSync(this.filesDir, { recursive: true });
     fs.mkdirSync(this.downloadsDir, { recursive: true });
     this.outFiles = this._loadOutRegistry(); // fileId -> {name, size}
@@ -323,8 +325,53 @@ export class Bridge {
         ...this.openp2p.info()
       };
       case 'diag-pack': return this._diagPack();
+      case 'storage-info': return this._storageInfo();
+      case 'set-storage': return this._setStorage(p);
       default: throw new Error(`未知操作：${name}`);
     }
+  }
+
+  /** 当前实际生效的存储路径 + config.json 里的原始配置（界面显示 / 迁移用）。 */
+  _storageInfo() {
+    const cfgPath = path.join(__dirname, '..', 'config.json');
+    let cfg = {};
+    try { cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8').replace(/^\uFEFF/, '')); } catch { /* 配置损坏时只报实际路径 */ }
+    return {
+      dataDir: this.store.dataDir,
+      filesDir: this.filesDir,
+      downloadsDir: this.downloadsDir,
+      configDataDir: cfg.storage?.dataDir ?? '',
+      configDownloadsDir: cfg.storage?.downloadsDir ?? ''
+    };
+  }
+
+  /**
+   * 开发模式（npm start）下的存储位置修改回退。
+   * 打包版走 Electron 主进程 IPC：先停桥再迁移，避免边写边拷。这里只做配置落盘 + 复制，
+   * 调用方收到 needRestart 后提示用户手动重启。
+   */
+  _setStorage({ dataDir, downloadsDir, migrate = true } = {}) {
+    const cfgPath = path.join(__dirname, '..', 'config.json');
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8').replace(/^\uFEFF/, ''));
+    const root = path.resolve(__dirname, '..');
+    const resolve = (p, fallback) => {
+      if (!p || typeof p !== 'string' || !p.trim()) return fallback;
+      const s = p.trim();
+      return path.isAbsolute(s) ? path.normalize(s) : path.resolve(root, s);
+    };
+    const oldData = resolve(cfg.storage?.dataDir, path.join(root, 'data'));
+    const newData = dataDir == null ? oldData : resolve(dataDir, path.join(root, 'data'));
+    if (migrate && path.resolve(newData) !== path.resolve(oldData)) {
+      fs.mkdirSync(newData, { recursive: true });
+      fs.cpSync(oldData, newData, { recursive: true, force: false, errorOnExist: false });
+    }
+    cfg.storage = {
+      ...(cfg.storage ?? {}),
+      dataDir: dataDir == null ? (cfg.storage?.dataDir ?? '') : String(dataDir),
+      downloadsDir: downloadsDir == null ? (cfg.storage?.downloadsDir ?? '') : String(downloadsDir)
+    };
+    fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + '\n');
+    return { ok: true, needRestart: true, dataDir: newData };
   }
 
   /** 诊断包：PC 端排查用（不含令牌明文、不含聊天内容）。 */

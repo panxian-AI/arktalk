@@ -28,8 +28,18 @@ const contactOf = (uin) => friends.find((f) => String(f.user_id) === String(uin)
 const avatarOfUser = (uin, name) => contactOf(uin)?.avatar || localAvatar(name ?? `账号 ${uin}`, uin);
 const avatarOfGroup = (gid, name) => localAvatar(name ?? `群 ${gid}`, gid);
 
+/* ---------- 触屏 / 桌面文案适配：手机上不显示 Enter、Shift+Enter、(S) 这类键盘快捷键 ---------- */
+function applyMobileUi() {
+  const mobile = !!window.matchMedia?.('(max-width: 760px)').matches;
+  const input = $('input'), send = $('btn-send');
+  if (input) input.placeholder = mobile ? '输入消息…' : '输入消息，Enter 发送，Shift+Enter 换行';
+  if (send) send.textContent = mobile ? '发送' : '发送(S)';
+}
+window.addEventListener('resize', applyMobileUi);
+
 /* ---------- 连接 ---------- */
 async function boot() {
+  applyMobileUi();
   // 桥可能在重启（崩溃自动拉起/手动重启）：拉配置失败不能让重连链断掉，
   // 否则界面会永久停在旧状态（"收不到消息"但桥其实一直在收）。
   try {
@@ -594,7 +604,10 @@ function renderSegments(segs, mine = false) {
       case 'reply': html += `<div class="reply-quote">回复 ${esc(d.sender_name ?? '')}：${esc(d.text ?? '')}</div>`; break;
       case 'record': {
         const src = d.url ?? (d.file && String(d.file).startsWith('base64://') ? `data:audio/webm;base64,${String(d.file).slice('base64://'.length)}` : d.file);
-        html += src ? `<audio controls src="${esc(src)}"></audio>` : '<span style="color:var(--text-sub)">[语音]</span>';
+        const dur = Number(d.duration) || 0;
+        html += src
+          ? `<div class="voice-card"><span class="voice-icon">🎤</span><span class="voice-label">${dur ? `${dur}″` : '语音'}</span><audio controls preload="metadata" src="${esc(src)}"></audio></div>`
+          : '<span style="color:var(--text-sub)">[语音]</span>';
         break;
       }
       case 'video': html += d.url ? `<video controls src="${esc(d.url)}" style="max-width:220px;border-radius:6px"></video>` : '<span style="color:var(--text-sub)">[视频]</span>'; break;
@@ -606,7 +619,7 @@ function renderSegments(segs, mine = false) {
         const status = `<span class="file-status" data-fstatus="${esc(fid)}">${d.downloaded ? `已保存：${esc(d.where ?? '')}` : ''}</span>`;
         const dlBtn = mine ? '' : `<button class="mini primary dl-btn" data-dl="${esc(fid)}" data-name="${esc(nm)}" data-size="${esc(d.size ?? 0)}">${d.downloaded ? '重新下载' : '保存'}</button>`;
         const locBtn = d.downloaded && d.dpath ? `<button class="mini loc-btn" data-loc="${esc(d.dpath)}" title="打开文件所在位置">📁 位置</button>` : '';
-        html += `<div class="card-seg file-card" ${d.downloaded && d.dpath ? `data-dpath="${esc(d.dpath)}" draggable="true" title="拖到桌面/文件夹可直接复制"` : ''}>📎 ${esc(nm)}（${sz}）${dlBtn}${locBtn}${status}</div>`;
+        html += `<div class="card-seg file-card" ${d.downloaded && d.dpath ? `data-dpath="${esc(d.dpath)}" draggable="true" title="拖到桌面/文件夹可直接复制"` : ''}><span class="file-name">📎 ${esc(nm)}（${sz}）</span><span class="file-actions">${dlBtn}${locBtn}</span>${status}</div>`;
         break;
       }
       case 'json': case 'ark': html += `<div class="card-seg">[卡片消息]</div>`; break;
@@ -904,6 +917,16 @@ function openProfileModal(pendingAvatar) {
       <div class="diag-head"><span id="pf-dns-dot" class="on-dot off"></span><span id="pf-dns-status">DNS 修复：读取中…</span><button class="mini" id="pf-dns-btn">开启</button></div>
       <div class="pf-hint">有些运营商（如广电物联网卡）会拦截境外 DNS，穿透程序只会卡在「等待登录…」。开启后只接管公共 DNS 的 53 端口查询、改用本机运营商 DNS，不影响其它上网流量。</div>
     </div>` : ''}
+    ${window.arkDesktop?.isElectron ? `<div class="modal-sub">存储位置（聊天记录与接收的文件）</div>
+    <div class="storage-box" id="pf-storage-box">
+      <div class="storage-line"><span>数据目录</span><code id="pf-storage-data">读取中…</code></div>
+      <div class="storage-line"><span>接收文件</span><code id="pf-storage-dl">读取中…</code></div>
+      <div class="update-actions">
+        <button class="mini" id="pf-storage-data-btn">更改数据目录…</button>
+        <button class="mini" id="pf-storage-dl-btn">更改接收目录…</button>
+      </div>
+      <div class="pf-hint">更改后会把已有数据复制到新目录并重启应用；原目录保留不删除。</div>
+    </div>` : ''}
     <div class="modal-sub">软件更新（只有被标记为「正式稳定版」的版本才会提示）</div>
     <div class="update-box" id="pf-update-box">
       <div class="update-line"><span id="pf-update-status">检查中…</span><button class="mini" id="pf-update-check">重新检查</button></div>
@@ -1083,6 +1106,44 @@ function openProfileModal(pendingAvatar) {
   };
   $('pf-update-check').onclick = renderUpdate;
   renderUpdate();
+
+  // ---------- 存储位置（仅电脑版）：读当前路径 / 选目录 / 迁移并重启 ----------
+  const initStorage = async () => {
+    if (!window.arkDesktop?.isElectron || !$('pf-storage-data')) return;
+    try {
+      const info = await rpc('storage-info');
+      const showData = $('pf-storage-data'), showDl = $('pf-storage-dl');
+      if (showData) showData.textContent = info.dataDir || '-';
+      if (showDl) showDl.textContent = info.downloadsDir || '-';
+      const change = async (kind) => {
+        const isData = kind === 'data';
+        const title = isData ? '选择聊天记录与文件存储目录' : '选择接收文件保存目录';
+        const dir = await window.arkDesktop.storageChoose(title);
+        if (!dir) return;
+        const what = isData ? '数据目录' : '接收文件目录';
+        if (!confirm(`确定把${what}改为：\n${dir}\n\n已有数据会复制到新目录，随后自动重启应用。原目录会保留，不会删除。`)) return;
+        const btn = $(isData ? 'pf-storage-data-btn' : 'pf-storage-dl-btn');
+        if (btn) { btn.disabled = true; btn.textContent = '迁移中…'; }
+        try {
+          const r = await window.arkDesktop.storageSet({
+            dataDir: isData ? dir : null,
+            downloadsDir: isData ? null : dir,
+            migrate: isData
+          });
+          if (r?.ok === false) throw new Error(r.error || '未知错误');
+        } catch (e) {
+          alert(`修改失败：${e.message}`);
+          if (btn) { btn.disabled = false; btn.textContent = '更改…'; }
+        }
+      };
+      $('pf-storage-data-btn').onclick = () => change('data');
+      $('pf-storage-dl-btn').onclick = () => change('dl');
+    } catch (e) {
+      const el = $('pf-storage-data');
+      if (el) el.textContent = `读取失败：${e.message}`;
+    }
+  };
+  initStorage();
 
   setTimeout(() => $('pf-nick').focus(), 0);
 };

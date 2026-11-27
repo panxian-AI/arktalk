@@ -17,5 +17,9 @@
     "enabled": false,
     "exePath": "",
     "token": ""
+  },
+  "storage": {
+    "dataDir": "",
+    "downloadsDir": ""
   }
 }
