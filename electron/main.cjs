@@ -1,9 +1,11 @@
 // ArkTalk 桌面窗口壳（Electron）。
 // 与 QQ 平行：不碰 QQ 进程、不抢登录，只是 SnowLuma 上游的又一个客户端。
 // 职责：拉起（或复用）本地桥 → 开一个独立窗口加载它 → 托盘常驻 → 退出时收好摊。
-const { app, BrowserWindow, session, Tray, Menu, nativeImage, shell } = require('electron');
+const { app, BrowserWindow, session, Tray, Menu, nativeImage, shell, ipcMain, webUtils } = require('electron');
 const { spawn } = require('node:child_process');
 const http = require('node:http');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
 const PORT = 3020;
@@ -99,6 +101,39 @@ async function ensureBridge() {
   }
 }
 
+// ---------- 原生文件拖出：把图片/文件从聊天窗口拖到桌面/资源管理器 ----------
+// 页面在 dragstart 里同步发这个 IPC，主进程用 Electron 的 startDrag 把真实文件交给系统。
+ipcMain.on('ark:drag-out', (event, payload = {}) => {
+  try {
+    let file = '';
+    let suggested = '';
+    if (payload.filePath && fs.existsSync(payload.filePath)) {
+      file = payload.filePath;
+      suggested = path.basename(file);
+    } else if (payload.dataUrl) {
+      const m = /^data:([^;,]+);base64,([\s\S]+)$/.exec(String(payload.dataUrl));
+      if (!m) throw new Error('无法识别的图片数据');
+      const ext = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp', 'image/bmp': 'bmp' }[m[1].toLowerCase()] || 'png';
+      const base = String(payload.name ?? '图片').replace(/[\\/:*?"<>|]/g, '_').slice(0, 60) || `IMG_${Date.now()}`;
+      const dir = path.join(os.tmpdir(), 'arktalk-drag');
+      fs.mkdirSync(dir, { recursive: true });
+      file = path.join(dir, /\.[a-z0-9]+$/i.test(base) ? base : `${base}.${ext}`);
+      fs.writeFileSync(file, Buffer.from(m[2], 'base64'));
+      suggested = path.basename(file);
+    }
+    if (!file || !fs.existsSync(file)) throw new Error('文件不存在或尚未保存到本地');
+    const icon = nativeImage.createFromPath(path.join(app.getAppPath(), 'assets', 'icon.ico'));
+    const opts = { file, ...(icon && !icon.isEmpty() ? { icon } : {}) };
+    // Electron 32+ 用 webUtils.startDrag；旧版回退 webContents.startDrag
+    if (webUtils?.startDrag) webUtils.startDrag(opts);
+    else if (win?.webContents?.startDrag) win.webContents.startDrag(opts);
+    else throw new Error('当前 Electron 版本不支持原生拖出');
+    event.returnValue = { ok: true, file, name: suggested };
+  } catch (e) {
+    event.returnValue = { ok: false, error: String(e?.message || e) };
+  }
+});
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1080,
@@ -109,7 +144,11 @@ function createWindow() {
     backgroundColor: '#f2f4f7',
     icon: path.join(app.getAppPath(), 'assets', 'icon.ico'),
     autoHideMenuBar: true,
-    webPreferences: { contextIsolation: true, nodeIntegration: false }
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      preload: path.join(__dirname, 'preload.cjs')
+    }
   });
   win.loadURL(URL_BASE);
 

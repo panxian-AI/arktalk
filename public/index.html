@@ -78,6 +78,20 @@
   </main>
 </div>
 <div id="modal-backdrop" hidden><div id="modal"></div></div>
+<!-- 拖文件到窗口：覆盖提示 + 二次确认 -->
+<div id="drop-overlay" hidden><div class="drop-inner">📥 松开鼠标，把文件发到当前会话</div></div>
+<div id="drop-confirm" hidden>
+  <div class="dc-box">
+    <div class="dc-title">确认发送文件</div>
+    <div class="dc-target" id="dc-target"></div>
+    <div class="dc-list" id="dc-list"></div>
+    <label class="dc-asfile"><input type="checkbox" id="dc-asfile"> 全部作为文件原样发送（不按图片压缩）</label>
+    <div class="dc-actions">
+      <button class="mini" id="dc-cancel">取消</button>
+      <button class="mini primary" id="dc-ok">确认发送</button>
+    </div>
+  </div>
+</div>
 <div id="lightbox" hidden>
   <img id="lightbox-img" alt="">
   <div id="lightbox-bar">

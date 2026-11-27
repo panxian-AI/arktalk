@@ -303,3 +303,25 @@ body { font: 14px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; color: var(--te
 
 /* "打开位置"按钮 */
 .loc-btn { color: var(--accent) !important; }
+
+/* ---------- 桌面端：拖入遮罩 + 二次确认框 ---------- */
+#drop-overlay { position: fixed; inset: 0; z-index: 900; background: rgba(20,110,220,.18);
+  display: flex; align-items: center; justify-content: center; pointer-events: none; }
+#drop-overlay[hidden] { display: none; }
+.drop-inner { padding: 28px 44px; border: 2px dashed var(--accent); border-radius: 16px;
+  background: var(--bg, #fff); color: var(--accent); font-size: 20px; font-weight: 600;
+  box-shadow: 0 8px 40px rgba(0,0,0,.18); }
+#drop-confirm { position: fixed; inset: 0; z-index: 950; background: rgba(0,0,0,.45);
+  display: flex; align-items: center; justify-content: center; }
+#drop-confirm[hidden] { display: none; }
+.dc-box { width: min(460px, 92vw); max-height: 80vh; overflow: auto; background: var(--bg, #fff);
+  border-radius: 12px; padding: 20px 22px; box-shadow: 0 12px 48px rgba(0,0,0,.3); }
+.dc-title { font-size: 18px; font-weight: 700; margin-bottom: 6px; }
+.dc-target { color: var(--text-sub); font-size: 13px; margin-bottom: 12px; }
+.dc-list { border: 1px solid var(--border, #e0e4ea); border-radius: 8px; padding: 6px 10px; max-height: 240px; overflow: auto; }
+.dc-row { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; font-size: 14px; border-bottom: 1px solid var(--border, #eef0f4); }
+.dc-row:last-child { border-bottom: 0; }
+.dc-fname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dc-fsize { color: var(--text-sub); flex: none; }
+.dc-asfile { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-sub); margin: 14px 0; cursor: pointer; }
+.dc-actions { display: flex; justify-content: flex-end; gap: 10px; }

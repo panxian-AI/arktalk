@@ -475,12 +475,16 @@ function setFileDone(fid, where, fullPath) {
   document.querySelectorAll(`[data-fstatus="${CSS.escape(String(fid))}"]`).forEach((el) => {
     el.textContent = where ? `已保存：${where}` : '已保存 ✓';
     if (where) el.title = where;
-    if (fullPath && !el.parentElement.querySelector('.loc-btn')) {
-      const b = document.createElement('button');
-      b.className = 'mini loc-btn';
-      b.textContent = '📁 位置';
-      b.dataset.loc = fullPath;
-      el.after(b);
+    if (fullPath) {
+      const card = el.closest('.file-card');
+      if (card) { card.dataset.dpath = fullPath; card.draggable = true; card.title = '拖到桌面/文件夹可直接复制'; }
+      if (!el.parentElement.querySelector('.loc-btn')) {
+        const b = document.createElement('button');
+        b.className = 'mini loc-btn';
+        b.textContent = '📁 位置';
+        b.dataset.loc = fullPath;
+        el.after(b);
+      }
     }
   });
 }
@@ -506,19 +510,25 @@ $('btn-file').onclick = () => {
   }
   $('file-input').click();
 };
-$('file-input').addEventListener('change', async () => {
-  const file = $('file-input').files[0];
-  $('file-input').value = '';
-  if (!file || !activeChat || activeChat.type !== 'private') return;
+/** 把一个本地 File 作为「文件消息」发送（📎 选择 / 拖入都走这里）。 */
+async function sendLocalFile(file) {
+  if (!file || !activeChat || activeChat.type !== 'private') return false;
   try {
     $('send-hint').textContent = `上传中… ${file.name}`;
     const up = await uploadFile(file, (p) => { $('send-hint').textContent = `上传中… ${file.name} ${Math.floor(p * 100)}%`; });
     await rpc('send-file', { userId: Number(activeChat.id), fileId: up.fileId, name: up.name, size: up.size });
     $('send-hint').textContent = '';
+    return true;
   } catch (e) {
     $('send-hint').textContent = `文件发送失败：${e.message}`;
     setTimeout(() => { $('send-hint').textContent = ''; }, 4000);
+    return false;
   }
+}
+$('file-input').addEventListener('change', async () => {
+  const file = $('file-input').files[0];
+  $('file-input').value = '';
+  await sendLocalFile(file);
 });
 $('messages').addEventListener('click', async (e) => {
   const loc = e.target.closest('.loc-btn');
@@ -578,7 +588,7 @@ function renderSegments(segs, mine = false) {
         let src = d.url ?? '';
         if (!src && d.file && String(d.file).startsWith('base64://')) src = `data:image/png;base64,${String(d.file).slice('base64://'.length)}`;
         if (!src) src = d.file ?? '';
-        html += `<img class="image-seg" src="${esc(src)}" loading="lazy">`;
+        html += `<img class="image-seg" src="${esc(src)}" data-dname="${esc(d.name ?? '')}" loading="lazy" draggable="true" title="点击放大 / 拖到桌面保存">`;
         break;
       }
       case 'reply': html += `<div class="reply-quote">回复 ${esc(d.sender_name ?? '')}：${esc(d.text ?? '')}</div>`; break;
@@ -596,7 +606,7 @@ function renderSegments(segs, mine = false) {
         const status = `<span class="file-status" data-fstatus="${esc(fid)}">${d.downloaded ? `已保存：${esc(d.where ?? '')}` : ''}</span>`;
         const dlBtn = mine ? '' : `<button class="mini primary dl-btn" data-dl="${esc(fid)}" data-name="${esc(nm)}" data-size="${esc(d.size ?? 0)}">${d.downloaded ? '重新下载' : '保存'}</button>`;
         const locBtn = d.downloaded && d.dpath ? `<button class="mini loc-btn" data-loc="${esc(d.dpath)}" title="打开文件所在位置">📁 位置</button>` : '';
-        html += `<div class="card-seg file-card">📎 ${esc(nm)}（${sz}）${dlBtn}${locBtn}${status}</div>`;
+        html += `<div class="card-seg file-card" ${d.downloaded && d.dpath ? `data-dpath="${esc(d.dpath)}" draggable="true" title="拖到桌面/文件夹可直接复制"` : ''}>📎 ${esc(nm)}（${sz}）${dlBtn}${locBtn}${status}</div>`;
         break;
       }
       case 'json': case 'ark': html += `<div class="card-seg">[卡片消息]</div>`; break;
@@ -1114,10 +1124,9 @@ $('btn-image').onclick = () => {
   }
   $('image-input').click();
 };
-$('image-input').addEventListener('change', async () => {
-  const file = $('image-input').files[0];
-  if (!file || !activeChat) return;
-  $('image-input').value = '';
+/** 把一个本地图片 File 作为「图片消息」发送（🖼️ 选择 / 拖入都走这里）。 */
+async function sendLocalImage(file) {
+  if (!file || !activeChat) return false;
   try {
     let dataUrl, isOriginal = false;
     if (sendOriginal && file.size <= 25 * 1024 * 1024) {
@@ -1131,10 +1140,17 @@ $('image-input').addEventListener('change', async () => {
       dataUrl = await compressImage(file, 1280);
     }
     await sendSeg({ type: 'image', data: { url: dataUrl, ...(isOriginal ? { original: true } : {}) } }, '图片发送中…');
+    return true;
   } catch (e) {
     $('send-hint').textContent = `图片发送失败：${e.message}`;
     setTimeout(() => { $('send-hint').textContent = ''; }, 4000);
+    return false;
   }
+}
+$('image-input').addEventListener('change', async () => {
+  const file = $('image-input').files[0];
+  $('image-input').value = '';
+  await sendLocalImage(file);
 });
 
 /* ---------- 图片灯箱：点聊天里的图片放大看 + 一键保存 ---------- */
@@ -1186,7 +1202,17 @@ let recState = null;
 const MAX_REC_MS = 60000;
 
 async function startRecording() {
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  // 部分 WebView/设备：带处理链的 audio 请求会报 NotReadableError，关掉全部处理再试一次
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    if (e.name === 'NotReadableError' || e.name === 'OverconstrainedError') {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 }
+      });
+    } else { throw e; }
+  }
   const mime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'].find((t) => window.MediaRecorder?.isTypeSupported?.(t)) ?? '';
   const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
   const chunks = [];
@@ -1237,13 +1263,100 @@ $('btn-voice').onclick = () => {
   if (!activeChat) return;
   if (recState) stopRecording(false);
   else startRecording().catch((e) => {
-    $('send-hint').textContent = `无法录音：${e.message}`;
-    setTimeout(() => { $('send-hint').textContent = ''; }, 4000);
+    // 常见失败按名字归类，给出可执行的指引而不是干巴巴的报错
+    const hint = e.name === 'NotAllowedError'
+      ? '无法录音：麦克风权限被拒绝。请到 系统设置 → 应用 → ArkTalk → 权限，开启麦克风后再试'
+      : e.name === 'NotFoundError'
+        ? '无法录音：设备上没有找到可用的麦克风'
+        : e.name === 'NotReadableError'
+          ? '无法录音：麦克风被其他应用占用，关闭占用后重试'
+          : `无法录音：${e.name || ''} ${e.message}`;
+    $('send-hint').textContent = hint;
+    setTimeout(() => { $('send-hint').textContent = ''; }, 6000);
   });
 };
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && recState) { e.preventDefault(); stopRecording(true); }
 });
+
+/* ---------- 桌面端：拖出复制 + 拖入发送（带二次确认） ---------- */
+// 拖出：图片/已下载文件 → 系统原生文件（可拖进桌面、资源管理器、其它程序）
+document.addEventListener('dragstart', (e) => {
+  const desk = window.arkDesktop;
+  if (!desk?.isElectron) return;
+  const img = e.target.closest?.('.image-seg');
+  const card = e.target.closest?.('.file-card');
+  let payload = null;
+  if (img?.src) {
+    payload = { dataUrl: img.src, name: img.dataset.dname || '' };
+  } else if (card?.dataset.dpath) {
+    payload = { filePath: card.dataset.dpath };
+  }
+  if (!payload) return;
+  const res = desk.dragOut(payload);
+  if (res?.ok === false) {
+    e.preventDefault();
+    $('send-hint').textContent = `拖拽失败：${res.error}`;
+    setTimeout(() => { $('send-hint').textContent = ''; }, 4000);
+  }
+});
+// 拖入：只接受文件；松手弹二次确认框，确认后才发送
+let dragDepth = 0;
+const hasFiles = (e) => !!e.dataTransfer?.types && Array.from(e.dataTransfer.types).includes('Files');
+document.addEventListener('dragenter', (e) => {
+  if (!hasFiles(e) || window.arkNative) return;
+  e.preventDefault();
+  dragDepth++;
+  $('drop-overlay').hidden = false;
+});
+document.addEventListener('dragover', (e) => {
+  if (!hasFiles(e) || window.arkNative) return;
+  e.preventDefault();
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+});
+document.addEventListener('dragleave', (e) => {
+  if (!hasFiles(e)) return;
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (!dragDepth) $('drop-overlay').hidden = true;
+});
+document.addEventListener('drop', async (e) => {
+  if (!hasFiles(e) || window.arkNative) return;
+  e.preventDefault();
+  dragDepth = 0;
+  $('drop-overlay').hidden = true;
+  const files = Array.from(e.dataTransfer?.files ?? []);
+  if (!files.length) return;
+  if (!activeChat) { $('send-hint').textContent = '请先选择一个会话再拖入文件'; setTimeout(() => { $('send-hint').textContent = ''; }, 3000); return; }
+  if (activeChat.type !== 'private') { $('send-hint').textContent = '文件/图片拖拽发送暂只支持私聊'; setTimeout(() => { $('send-hint').textContent = ''; }, 3000); return; }
+  pendingDropFiles = files;
+  $('dc-target').textContent = `发送给：${activeChat.name ?? `账号 ${activeChat.id}`}`;
+  const list = $('dc-list');
+  list.innerHTML = '';
+  for (const f of files) {
+    const row = document.createElement('div');
+    row.className = 'dc-row';
+    row.innerHTML = `<span class="dc-fname"></span><span class="dc-fsize">${fmtSize(f.size)}</span>`;
+    row.querySelector('.dc-fname').textContent = (f.type.startsWith('image/') ? '🖼️ ' : '📎 ') + f.name;
+    list.appendChild(row);
+  }
+  $('drop-confirm').hidden = false;
+});
+let pendingDropFiles = [];
+function closeDropConfirm() { $('drop-confirm').hidden = true; pendingDropFiles = []; $('dc-asfile').checked = false; }
+$('dc-cancel').onclick = closeDropConfirm;
+$('drop-confirm').addEventListener('click', (e) => { if (e.target === $('drop-confirm')) closeDropConfirm(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('drop-confirm').hidden) closeDropConfirm(); });
+$('dc-ok').onclick = async () => {
+  const files = pendingDropFiles.slice();
+  const asFile = $('dc-asfile').checked;
+  closeDropConfirm();
+  let ok = 0;
+  for (const f of files) {
+    const sent = !asFile && f.type.startsWith('image/') ? await sendLocalImage(f) : await sendLocalFile(f);
+    if (sent) ok++;
+  }
+  if (ok) { $('send-hint').textContent = `已发送 ${ok} 个文件`; setTimeout(() => { $('send-hint').textContent = ''; }, 2500); }
+};
 
 // 安卓原生壳用：点通知后直接进入对应会话
 window.arkOpenChat = (id) => {
