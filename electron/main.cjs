@@ -32,12 +32,15 @@ app.disableHardwareAcceleration();
 // 保险起见再补两个渲染层开关（部分远控环境只关硬件加速不够）
 app.commandLine.appendSwitch('disable-gpu-compositing');
 
+const { Updater } = require('./updater.cjs');
+
 let serverChild = null;
 let win = null;
 let tray = null;
 let isQuitting = false;      // 真正退出（而不是收进托盘）
 let trayTipShown = false;    // 首次最小化到托盘的气泡只弹一次
 let statusTimer = null;
+let updater = null;          // 自动更新器（app ready 后实例化）
 
 function bridgeUp() {
   return new Promise((resolve) => {
@@ -134,6 +137,54 @@ ipcMain.on('ark:drag-out', (event, payload = {}) => {
   }
 });
 
+// ---------- 自动更新 IPC（只认 stable.json 里 stable=true 的版本） ----------
+const _updLog = (s) => console.log(`[ArkTalk update] ${s}`);
+ipcMain.handle('ark:update-check', async () => {
+  try {
+    if (!app.isPackaged) return { available: false, dev: true, current: 'dev', latest: '', notes: '', assetUrl: '', skipped: false };
+    if (!updater) updater = new Updater(app, _updLog);
+    const r = await updater.check();
+    r.canRollback = app.isPackaged && updater.hasBackup();
+    return r;
+  } catch (e) { return { error: String(e?.message || e) }; }
+});
+ipcMain.handle('ark:update-prepare', async () => {
+  try {
+    if (!app.isPackaged) throw new Error('开发模式不支持自动更新');
+    if (!updater) updater = new Updater(app, _updLog);
+    const info = await updater.check();
+    if (!info.available) throw new Error('当前没有可用的正式更新');
+    const dir = await updater.prepare(info);
+    return { ok: true, version: info.latest, dir };
+  } catch (e) { return { ok: false, error: String(e?.message || e) }; }
+});
+ipcMain.handle('ark:update-apply', async () => {
+  try {
+    if (!updater) updater = new Updater(app, _updLog);
+    const info = await updater.check();
+    const root = path.resolve(app.getAppPath(), '..', '..');
+    const newDir = path.join(path.dirname(root), `ArkTalk-${info.latest}-win64`);
+    if (!fs.existsSync(newDir)) throw new Error('更新包尚未下载，请先点下载');
+    updater.applyAndRestart(newDir);
+    setTimeout(() => { isQuitting = true; app.exit(0); }, 300);
+    return { ok: true };
+  } catch (e) { return { ok: false, error: String(e?.message || e) }; }
+});
+ipcMain.handle('ark:update-skip', async (_e, v) => {
+  if (!updater) updater = new Updater(app, _updLog);
+  updater.skip(v); return { ok: true };
+});
+ipcMain.handle('ark:update-rollback', async () => {
+  try {
+    if (!app.isPackaged) throw new Error('开发模式不支持回退');
+    if (!updater) updater = new Updater(app, _updLog);
+    if (!updater.hasBackup()) throw new Error('没有可回退的旧版本');
+    updater.rollbackAndRestart();
+    setTimeout(() => { isQuitting = true; app.exit(0); }, 300);
+    return { ok: true };
+  } catch (e) { return { ok: false, error: String(e?.message || e) }; }
+});
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1080,
@@ -173,7 +224,11 @@ function createWindow() {
       if (win && !win.isDestroyed()) win.loadURL(URL_BASE);
     }, 1500);
   });
-  win.webContents.on('did-finish-load', () => { failLoads = 0; });
+  win.webContents.on('did-finish-load', () => {
+    failLoads = 0;
+    // 首次及重载后都尝试打开更新弹窗——平时无害（页面没监听就忽略），
+    // 托盘点「检查更新」时会 showWindow + 触发一次 reload 式的校验。
+  });
 
   // 关窗不退出：收进托盘，桥和穿透继续运行（不然关窗就掉线，消息收不到）
   win.on('close', (e) => {
@@ -246,6 +301,25 @@ function buildTrayMenu(status) {
       toolTip: '完全退出并重新启动（界面卡死/收不到消息时用）',
       click: () => restartApp()
     },
+    {
+      label: '检查更新…',
+      click: () => {
+        showWindow();
+        setTimeout(() => { if (win && !win.isDestroyed()) win.webContents.send('ark:open-update'); }, 250);
+      }
+    },
+    ...(app.isPackaged && (() => { try { return new Updater(app, _updLog).hasBackup(); } catch { return false; } })() ? [{
+      label: '回退到上一个版本',
+      toolTip: '恢复到更新前的版本并重启',
+      click: () => {
+        try {
+          const u = new Updater(app, _updLog);
+          if (!u.hasBackup()) return;
+          u.rollbackAndRestart();
+          setTimeout(() => { isQuitting = true; app.exit(0); }, 300);
+        } catch (e) { _updLog('回退失败：' + e.message); }
+      }
+    }] : []),
     { type: 'separator' },
     {
       label: '退出 ArkTalk',

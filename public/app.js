@@ -806,13 +806,81 @@ function shrinkImage(file, size) {
     img.src = url;
   });
 }
-$('rail-avatar').onclick = () => {
+/* ---------- 头像 1:1 裁切：选图 → 弹出裁切框（拖动定位 + 滚轮/滑块缩放）→ 确认成正方形 ---------- */
+let cropState = null; // {img, scale, minScale, x, y, size}
+function openAvatarCropper(file) {
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = () => {
+    URL.revokeObjectURL(url);
+    const size = 240;              // 裁切框显示尺寸
+    const minScale = Math.min(size / img.width, size / img.height); // 至少铺满
+    cropState = { img, scale: minScale, minScale, x: 0, y: 0, size };
+    openModal(`<div class="modal-title">裁切头像（1:1）</div>
+      <div class="crop-stage" id="crop-stage"><canvas id="crop-canvas" width="${size}" height="${size}"></canvas></div>
+      <div class="crop-controls">
+        <span>缩放</span>
+        <input type="range" id="crop-zoom" min="${Math.round(minScale * 100)}" max="${Math.round(minScale * 4 * 100)}" value="${Math.round(minScale * 100)}">
+      </div>
+      <div class="pf-hint" style="text-align:center">拖动图片调整位置，滚轮或滑块缩放，确认后保存为正方形头像</div>
+      <div class="modal-actions"><button class="ghost" id="crop-cancel">取消</button><button id="crop-ok">使用这张</button></div>`);
+    const cvs = $('crop-canvas');
+    const ctx = cvs.getContext('2d');
+    const draw = () => {
+      const s = cropState;
+      const w = s.img.width * s.scale, h = s.img.height * s.scale;
+      ctx.clearRect(0, 0, s.size, s.size);
+      ctx.fillStyle = '#eceff4'; ctx.fillRect(0, 0, s.size, s.size);
+      ctx.drawImage(s.img, (s.size - w) / 2 + s.x, (s.size - h) / 2 + s.y, w, h);
+    };
+    // 限制拖动范围：图边缘不能露白
+    const clamp = () => {
+      const s = cropState;
+      const w = s.img.width * s.scale, h = s.img.height * s.scale;
+      const maxX = Math.max(0, (w - s.size) / 2), maxY = Math.max(0, (h - s.size) / 2);
+      s.x = Math.max(-maxX, Math.min(maxX, s.x));
+      s.y = Math.max(-maxY, Math.min(maxY, s.y));
+    };
+    let drag = null;
+    cvs.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY, ox: cropState.x, oy: cropState.y }; cvs.setPointerCapture(e.pointerId); });
+    cvs.addEventListener('pointermove', (e) => { if (!drag) return; cropState.x = drag.ox + e.clientX - drag.x; cropState.y = drag.oy + e.clientY - drag.y; clamp(); draw(); });
+    cvs.addEventListener('pointerup', () => { drag = null; });
+    cvs.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const s = cropState;
+      s.scale = Math.max(s.minScale, Math.min(s.minScale * 4, s.scale * (e.deltaY > 0 ? 0.92 : 1.08)));
+      clamp(); draw();
+      $('crop-zoom').value = Math.round(s.scale * 100);
+    }, { passive: false });
+    $('crop-zoom').oninput = (e) => { cropState.scale = Number(e.target.value) / 100; clamp(); draw(); };
+    $('crop-cancel').onclick = () => { cropState = null; openProfileModal(); };
+    $('crop-ok').onclick = () => {
+      const s = cropState;
+      const out = document.createElement('canvas');
+      out.width = out.height = 256;
+      const octx = out.getContext('2d');
+      const w = s.img.width * s.scale, h = s.img.height * s.scale;
+      octx.fillStyle = '#eceff4'; octx.fillRect(0, 0, 256, 256);
+      octx.drawImage(s.img, (256 - w) / 2 + s.x * (256 / s.size), (256 - h) / 2 + s.y * (256 / s.size), w, h);
+      const dataUrl = out.toDataURL('image/jpeg', 0.88);
+      cropState = null;
+      openProfileModal(dataUrl);
+    };
+    draw();
+  };
+  img.onerror = () => { alert('图片读取失败'); };
+  img.src = url;
+}
+
+$('rail-avatar').onclick = () => openProfileModal();
+/** 打开「我的账号」弹窗；pendingAvatar 为裁切好的头像 data URL（有则预填）。 */
+function openProfileModal(pendingAvatar) {
   modalMode = 'profile';
   openModal(`<div class="modal-title">我的账号</div>
     <div class="profile-row">
-      <img id="pf-avatar" class="avatar" src="${esc(selfInfo?.avatar || localAvatar(selfInfo?.nickname || '?', selfInfo?.accountId))}">
+      <img id="pf-avatar" class="avatar" src="${esc(pendingAvatar || selfInfo?.avatar || localAvatar(selfInfo?.nickname || '?', selfInfo?.accountId))}">
       <div>
-        <button class="mini" id="pf-avatar-btn">更换头像</button>
+        <button class="mini" id="pf-avatar-btn">上传并裁切头像</button>
         <input id="pf-avatar-input" type="file" accept="image/*" hidden>
         <div class="pf-hint">账号 ${esc(selfInfo?.accountId ?? '')}（认设备，不可改）</div>
       </div>
@@ -836,6 +904,18 @@ $('rail-avatar').onclick = () => {
       <div class="diag-head"><span id="pf-dns-dot" class="on-dot off"></span><span id="pf-dns-status">DNS 修复：读取中…</span><button class="mini" id="pf-dns-btn">开启</button></div>
       <div class="pf-hint">有些运营商（如广电物联网卡）会拦截境外 DNS，穿透程序只会卡在「等待登录…」。开启后只接管公共 DNS 的 53 端口查询、改用本机运营商 DNS，不影响其它上网流量。</div>
     </div>` : ''}
+    <div class="modal-sub">软件更新（只有被标记为「正式稳定版」的版本才会提示）</div>
+    <div class="update-box" id="pf-update-box">
+      <div class="update-line"><span id="pf-update-status">检查中…</span><button class="mini" id="pf-update-check">重新检查</button></div>
+      <div class="update-notes" id="pf-update-notes" hidden></div>
+      <div class="update-actions" id="pf-update-actions" hidden>
+        <button class="mini primary" id="pf-update-do">下载并安装</button>
+        <button class="mini" id="pf-update-later">跳过此版</button>
+      </div>
+      <div class="update-actions" id="pf-update-rollback-box" hidden>
+        <button class="mini" id="pf-update-rollback">回退到上一个版本</button>
+      </div>
+    </div>
     <div class="form-err" id="pf-err" hidden></div>
     <div class="modal-actions"><button class="ghost" id="pf-cancel">取消</button><button id="pf-ok">保存</button></div>`);
   $('pf-cancel').onclick = closeModal;
@@ -930,7 +1010,7 @@ $('rail-avatar').onclick = () => {
   }
   $('pf-avatar-input').addEventListener('change', () => {
     const file = $('pf-avatar-input').files[0];
-    if (file) shrinkImage(file, 128).then((u) => { $('pf-avatar').src = u; }).catch(() => {});
+    if (file) openAvatarCropper(file);
   });
   $('pf-ok').onclick = async () => {
     const err = $('pf-err');
@@ -943,6 +1023,67 @@ $('rail-avatar').onclick = () => {
     } catch (e) { err.textContent = e.message; err.hidden = false; }
     $('pf-ok').disabled = false;
   };
+  // ---------- 软件更新（两端统一入口：PC 走 arkDesktop，安卓走桥 RPC） ----------
+  const upd = {
+    check: () => (window.arkDesktop?.isElectron ? window.arkDesktop.updateCheck() : rpc('update-check')),
+    prepare: () => (window.arkDesktop?.isElectron ? window.arkDesktop.updatePrepare() : rpc('update-prepare')),
+    apply: () => (window.arkDesktop?.isElectron ? window.arkDesktop.updateApply() : rpc('update-apply')),
+    skip: (v) => (window.arkDesktop?.isElectron ? window.arkDesktop.updateSkip(v) : rpc('update-skip', { version: v })),
+    rollback: () => (window.arkDesktop?.isElectron ? window.arkDesktop.updateRollback() : rpc('update-rollback'))
+  };
+  const renderUpdate = async () => {
+    const st = $('pf-update-status'), box = $('pf-update-box');
+    if (!st || !box) return;
+    try {
+      const r = await upd.check();
+      if (r.error) { st.textContent = `检查失败：${r.error}`; return; }
+      if (r.dev) { st.textContent = '当前为开发模式（发行版才有自动更新）'; return; }
+      if (r.available && !r.skipped) {
+        st.textContent = `✅ 有正式更新：${r.current} → ${r.latest}${r.published ? `（${r.published}）` : ''}`;
+        const notes = $('pf-update-notes');
+        if (r.notes) { notes.textContent = r.notes; notes.hidden = false; }
+        $('pf-update-actions').hidden = false;
+        $('pf-update-do').onclick = async () => {
+          const btn = $('pf-update-do');
+          btn.disabled = true; btn.textContent = '下载中…';
+          try {
+            const p = await upd.prepare();
+            if (p?.ok === false) throw new Error(p.error);
+            btn.textContent = '安装并重启…';
+            const a = await upd.apply();
+            if (a?.ok === false) throw new Error(a.error);
+          } catch (e) { st.textContent = `更新失败：${e.message}`; btn.disabled = false; btn.textContent = '下载并安装'; }
+        };
+        $('pf-update-later').onclick = async () => { await upd.skip(r.latest); $('pf-update-actions').hidden = true; st.textContent = `已跳过 ${r.latest}（需要时点「重新检查」）`; };
+      } else if (r.available && r.skipped) {
+        st.textContent = `有新版本 ${r.latest}（你已选择跳过）`;
+        $('pf-update-actions').hidden = false;
+        $('pf-update-later').textContent = '取消跳过';
+        $('pf-update-later').onclick = async () => { await upd.skip(''); location.reload(); };
+        $('pf-update-do').onclick = async () => {
+          const btn = $('pf-update-do'); btn.disabled = true; btn.textContent = '下载中…';
+          try { const p = await upd.prepare(); if (p?.ok === false) throw new Error(p.error); btn.textContent = '安装并重启…'; const a = await upd.apply(); if (a?.ok === false) throw new Error(a.error); }
+          catch (e) { st.textContent = `更新失败：${e.message}`; btn.disabled = false; btn.textContent = '下载并安装'; }
+        };
+      } else {
+        st.textContent = `✅ 已是最新正式版（${r.current || '?'}）`;
+      }
+      // 回退入口（PC 有备份 / 安卓有备份的 APK 时显示）
+      const canRollback = window.arkNative
+        ? (await rpc('update-has-backup').catch(() => ({ ok: false }))).ok
+        : !!r.canRollback;
+      if (canRollback) {
+        $('pf-update-rollback-box').hidden = false;
+        $('pf-update-rollback').onclick = async () => {
+          try { const a = await upd.rollback(); if (a?.ok === false) throw new Error(a.error); }
+          catch (e) { st.textContent = `回退失败：${e.message}`; }
+        };
+      }
+    } catch (e) { st.textContent = `检查失败：${e.message}`; }
+  };
+  $('pf-update-check').onclick = renderUpdate;
+  renderUpdate();
+
   setTimeout(() => $('pf-nick').focus(), 0);
 };
 
@@ -1363,5 +1504,8 @@ window.arkOpenChat = (id) => {
   const key = 'p' + String(id);
   try { openChat(key); } catch { /* 联系人还没加载完就忽略 */ }
 };
+
+// 托盘「检查更新」→ 打开我的账号弹窗（更新区在里面）
+window.arkDesktop?.onOpenUpdate?.(() => { try { openProfileModal(); } catch { /* ignore */ } });
 
 boot();

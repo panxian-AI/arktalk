@@ -7,14 +7,16 @@ contextBridge.exposeInMainWorld('arkDesktop', {
   /**
    * 把一条消息里的图片/文件作为「原生文件」拖出去（可拖到桌面、资源管理器、其它应用）。
    * 必须同步调用（ipcRenderer.sendSync）——Electron 的 startDrag 要求处于用户拖动手势内。
-   * @param {{dataUrl?:string, filePath?:string, name?:string}} payload
-   * @returns {{ok:boolean, error?:string}}
    */
   dragOut(payload) {
-    try {
-      return ipcRenderer.sendSync('ark:drag-out', payload || {});
-    } catch (e) {
-      return { ok: false, error: String(e?.message || e) };
-    }
-  }
+    try { return ipcRenderer.sendSync('ark:drag-out', payload || {}); }
+    catch (e) { return { ok: false, error: String(e?.message || e) }; }
+  },
+  // 自动更新（异步 IPC）
+  onOpenUpdate(fn) { ipcRenderer.on('ark:open-update', () => fn()); },
+  updateCheck()   { return ipcRenderer.invoke('ark:update-check'); },
+  updatePrepare() { return ipcRenderer.invoke('ark:update-prepare'); },
+  updateApply()   { return ipcRenderer.invoke('ark:update-apply'); },
+  updateSkip(v)   { return ipcRenderer.invoke('ark:update-skip', v); },
+  updateRollback(){ return ipcRenderer.invoke('ark:update-rollback'); }
 });

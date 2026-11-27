@@ -1,0 +1,13 @@
+{
+  "version": "0.6.2",
+  "versionCode": 29,
+  "tag": "v0.6.2",
+  "stable": true,
+  "published": "2026-11-27",
+  "notes": "首个稳定版：双端直连聊天、已读回执、图片原图/灯箱、文件拖拽、后台通知",
+  "assets": {
+    "windows": "https://github.com/panxian-AI/arktalk/releases/download/v0.6.2/ArkTalk-0.6.2-win64.zip",
+    "android": "https://github.com/panxian-AI/arktalk-android/releases/download/v0.6.2/arktalk-v0.6.2-release.apk"
+  },
+  "_说明": "只有 stable=true 的版本才会被客户端检测为可更新。日常修复版照常发 Release，但不要改这个文件——只有用户明确说『这是正式版/稳定版』时才把 version/tag/assets 更新到这里并推送。"
+}
