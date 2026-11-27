@@ -163,6 +163,23 @@ export class Bridge {
       }));
       return;
     }
+    // 托盘/外部工具用的轻量状态（不含令牌，只读）
+    if (url.pathname === '/api/status') {
+      const online = this.link.onlineMap();
+      const friends = this.local.friends ?? [];
+      // 严格语义：只有 peers 里明确 readyState === 1 才算在线（不在表里 = 没连上）
+      const onCount = friends.filter((f) => online[String(f.user_id)] === true).length;
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        selfId: this.local.profile?.accountId ?? null,
+        nickname: this.local.profile?.nickname ?? '',
+        friends: friends.length,
+        online: onCount,
+        peers: online,
+        relay: !!this.local.settings?.openp2pToken
+      }));
+      return;
+    }
     if (url.pathname === '/api/upload' && req.method === 'POST') {
       if (url.searchParams.get('token') !== this.uiToken) { res.writeHead(403); res.end(); return; }
       this._onUpload(req, res, url).catch(() => { try { res.writeHead(500); res.end('upload failed'); } catch { /* ignore */ } });
