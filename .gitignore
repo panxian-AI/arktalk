@@ -11,3 +11,7 @@ node_modules/
 *.log
 .DS_Store
 Thumbs.db
+
+# OpenP2P 运行时配置（含个人令牌，绝不入库）
+bin/config.json
+bin/log/
