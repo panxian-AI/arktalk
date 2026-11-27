@@ -10,6 +10,12 @@ const PORT = 3020;
 const URL_BASE = `http://127.0.0.1:${PORT}`;
 const APP_NAME = 'ArkTalk';
 
+// 禁用 GPU 硬件加速：远程桌面/远控（ToDesk、向日葵、RDP）会话里 Electron 的 GPU
+// 渲染经常失效导致窗口全白；聊天界面走 CPU 渲染毫无压力。必须在 app ready 前调用。
+app.disableHardwareAcceleration();
+// 保险起见再补两个渲染层开关（部分远控环境只关硬件加速不够）
+app.commandLine.appendSwitch('disable-gpu-compositing');
+
 let serverChild = null;
 let win = null;
 

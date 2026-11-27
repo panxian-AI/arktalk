@@ -66,6 +66,11 @@ export class Bridge {
     this._wss = new WebSocketServer({ server: this._server, path: '/ws' });
     this._wss.on('connection', (ws, req) => this._onUi(ws, req));
 
+    // 启动即恢复联系人里的连接地址并拨号（不用等发第一条消息才发现连不上）
+    for (const f of this.local.friends) {
+      if (f.endpoint) this.link.setEndpoint(f.user_id, f.endpoint);
+    }
+
     // P2P 事件 → 落本机 + 广播界面
     this.link.on('message', (m) => this._onPeerMessage(m));
     this.link.on('profile', (p) => this._onPeerProfile(p));
