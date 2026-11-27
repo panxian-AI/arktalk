@@ -17,6 +17,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { PeerLink } from './p2p.js';
@@ -24,6 +25,27 @@ import { OpenP2PManager } from './openp2p.js';
 import { chatKeyOf, previewOf } from './message-util.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * 选一个用户真能找到的下载目录：优先「下载/ArkTalk」，不可写就退回数据目录。
+ * 之前直接用 data/downloads，文件收完了界面上也不给路径，等于"下不了"。
+ */
+function pickDownloadsDir(dataDir) {
+  const home = os.homedir();
+  const candidates = [
+    process.env.USERPROFILE ? path.join(process.env.USERPROFILE, 'Downloads', 'ArkTalk') : null,
+    path.join(home, 'Downloads', 'ArkTalk'),
+    path.join(dataDir, 'downloads')
+  ].filter(Boolean);
+  for (const dir of candidates) {
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.accessSync(dir, fs.constants.W_OK);
+      return dir;
+    } catch { /* 试下一个 */ }
+  }
+  return path.join(dataDir, 'downloads');
+}
 
 export class Bridge {
   /**
@@ -43,6 +65,14 @@ export class Bridge {
     this.uiToken = crypto.randomBytes(16).toString('hex');
     this.uiSockets = new Set();
     this.unread = new Map(); // chatKey -> count
+    // 已读回执：readMarks = 对方读到哪一刻（chatKey -> ts，落盘）；_readSent / _readPending = 我发给对方的
+    this.readMarks = new Map();
+    this._readSent = new Map();
+    this._readPending = new Map();
+    // 撤回：本机打标记（chatKey -> Set<message_id>），不动消息文件
+    this.recalled = new Map();
+    // 下载登记：fileId -> {where, path, size, time}（落盘），用来回答"这个文件下没下过"
+    this.downloadsDone = new Map();
     this.local = { profile: null, friends: [], groups: [] };
     this._loadLocal();
     if (!this.local.profile) {
@@ -50,6 +80,9 @@ export class Bridge {
       this.local.profile = { accountId: Math.floor(100000000 + Math.random() * 900000000), nickname: '', avatar: '' };
       this._saveLocal();
     }
+    this.readMarks = this._loadReadMarks();
+    this.recalled = this._loadRecalled();
+    this.downloadsDone = this._loadDownloadsDone();
     this.link = new PeerLink({ selfId: this.local.profile.accountId, listen: p2p, log });
     // 跨网穿透（OpenP2P，可选）：联系人里每个账号建一条 127.0.0.1:131xx → 对方 3021 的隧道
     this.openp2p = new OpenP2PManager({
@@ -59,7 +92,8 @@ export class Bridge {
     });
     // 文件传输：outFiles = 我发出去的（对方来拉）；downloads = 我正在收的
     this.filesDir = path.join(this.store.dataDir, 'files');
-    this.downloadsDir = path.join(this.store.dataDir, 'downloads');
+    // 收到的文件放到用户自己的"下载/ArkTalk"里，不要再埋进 data 目录（用户根本找不到）
+    this.downloadsDir = pickDownloadsDir(this.store.dataDir);
     fs.mkdirSync(this.filesDir, { recursive: true });
     fs.mkdirSync(this.downloadsDir, { recursive: true });
     this.outFiles = this._loadOutRegistry(); // fileId -> {name, size}
@@ -88,6 +122,10 @@ export class Bridge {
     // P2P 事件 → 落本机 + 广播界面
     this.link.on('message', (m) => this._onPeerMessage(m));
     this.link.on('profile', (p) => this._onPeerProfile(p));
+    // 对方已读回执：记录"对方读到哪一刻"，界面把这条时间之前的自发消息标成已读
+    this.link.on('read', ({ from, ts }) => this._onPeerRead(from, ts));
+    // 对方刚上线：把之前没发出去的已读回执补发一次（离线时发的丢了）
+    this.link.on('peer-online', (id) => this._flushReadPending(`p${id}`));
     // 对方换网后连进来 → 自动把它的最新 IP 记进联系人（网络环境变化免手填）
     this.link.on('endpoint-learned', ({ accountId, endpoint }) => {
       const f = this.local.friends.find((x) => Number(x.user_id) === Number(accountId));
@@ -180,6 +218,12 @@ export class Bridge {
       }));
       return;
     }
+    if (url.pathname === '/api/links') {
+      // 排查"一端在线另一端离线"用：每条连接的沉默时长（silentMs > 20000 说明可能半开）
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(this.link.linkStats()));
+      return;
+    }
     if (url.pathname === '/api/upload' && req.method === 'POST') {
       if (url.searchParams.get('token') !== this.uiToken) { res.writeHead(403); res.end(); return; }
       this._onUpload(req, res, url).catch(() => { try { res.writeHead(500); res.end('upload failed'); } catch { /* ignore */ } });
@@ -193,7 +237,8 @@ export class Bridge {
       const body = fs.readFileSync(file);
       const ext = path.extname(file);
       const mime = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.ico': 'image/x-icon' }[ext] ?? 'application/octet-stream';
-      res.writeHead(200, { 'content-type': mime });
+      // no-store：界面资源绝不走缓存——否则升级后 WebView/浏览器还拿旧 app.js，"新功能不生效"
+      res.writeHead(200, { 'content-type': mime, 'cache-control': 'no-store' });
       res.end(body);
     } catch {
       res.writeHead(404); res.end('not found');
@@ -223,12 +268,18 @@ export class Bridge {
   async _onUiFrame(ws, msg) {
     switch (msg.type) {
       case 'history': { // 本机记录（唯一来源，离线信息留在本机）
-        this._sendUi(ws, { type: 'history', chatKey: msg.chatKey, messages: this.store.read(msg.chatKey, msg.limit ?? 50), source: 'local' });
+        this._sendUi(ws, {
+          type: 'history',
+          chatKey: msg.chatKey,
+          messages: this.store.read(msg.chatKey, msg.limit ?? 50).map((r) => this._annotate(msg.chatKey, r)),
+          source: 'local'
+        });
         return;
       }
       case 'read': {
         this.unread.set(msg.chatKey, 0);
         this._broadcast({ type: 'unread', unread: Object.fromEntries(this.unread) });
+        this._sendReadReceipt(msg.chatKey); // 已读回执：让对方那条消息变"已读"
         return;
       }
       case 'rpc': {
@@ -261,19 +312,69 @@ export class Bridge {
       case 'send-private': return await this._sendPrivate(p);
       case 'send-to-group': return await this._sendToGroup(p);
       case 'send-file': return await this._sendFile(p);
+      case 'recall-message': return this._recallMessage(p);
+      case 'save-image': return this._saveImage(p);
       case 'download-file': return this._downloadFile(p);
+      case 'open-location': return this._openLocation(p);
       case 'peers': return { peers: this.link.onlineMap() };
       case 'set-openp2p-token': return this._setOpenP2pToken(p);
       case 'relay-status': return {
         tokenSet: !!this.local.settings?.openp2pToken,
         ...this.openp2p.info()
       };
+      case 'diag-pack': return this._diagPack();
       default: throw new Error(`未知操作：${name}`);
     }
   }
 
-  _setProfile({ nickname, avatar } = {}) {
-    if (nickname !== undefined) this.local.profile.nickname = String(nickname).trim().slice(0, 30);
+  /** 诊断包：PC 端排查用（不含令牌明文、不含聊天内容）。 */
+  _diagPack() {
+    const lan = [];
+    for (const [name, addrs] of Object.entries(os.networkInterfaces() || {})) {
+      for (const a of addrs || []) {
+        if (a.family === 'IPv4' && !a.internal) lan.push(`${name}:${a.address}`);
+      }
+    }
+    const pack = {
+      time: new Date().toLocaleString('zh-CN', { hour12: false }),
+      app: 'ArkTalk Desktop',
+      node: process.version,
+      platform: `${os.platform()} ${os.release()} ${os.arch()}`,
+      accountId: this.local.profile?.accountId,
+      nickname: this.local.profile?.nickname || '',
+      p2pPort: this.p2pCfg?.port ?? null,
+      lanAddrs: lan,
+      peers: this.link.onlineMap(),
+      links: typeof this.link.linkStats === 'function' ? this.link.linkStats() : null,
+      friends: (this.local.friends || []).map((f) => ({
+        id: f.user_id, nickname: f.nickname || '', endpoint: f.endpoint || ''
+      })),
+      relay: { tokenSet: !!this.local.settings?.openp2pToken, ...this.openp2p.info() },
+      files: {
+        downloadsDir: this.downloadsDir,
+        knownOut: this.outFiles.size,
+        active: [...this.downloads.values()].map((j) => ({
+          fileId: j.fileId, name: j.name, size: j.size, got: j.got,
+          seqIssued: j.seq, nextWrite: j.nextWrite, inFlight: [...j.inFlight],
+          eof: j.eofSeen, idleMs: Date.now() - j.lastProgress
+        }))
+      }
+    };
+    // 同时落成文件，方便直接发出去
+    try {
+      const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'diag');
+      fs.mkdirSync(dir, { recursive: true });
+      const name = `arktalk-diag-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.json`;
+      const file = path.join(dir, name);
+      fs.writeFileSync(file, JSON.stringify(pack, null, 1), 'utf8');
+      pack.file = file;
+    } catch (e) {
+      pack.file = `写入失败：${e.message}`;
+    }
+    return pack;
+  }
+
+  _setProfile({ nickname, avatar } = {}) {    if (nickname !== undefined) this.local.profile.nickname = String(nickname).trim().slice(0, 30);
     if (avatar !== undefined) this.local.profile.avatar = String(avatar).slice(0, 400 * 1024);
     this._saveLocal();
     this._broadcastHello();
@@ -356,7 +457,8 @@ export class Bridge {
       message: segs,
       raw_message: '',
       self_sent: true,
-      queued: !!queued
+      queued: !!queued,
+      read: false            // 发出去先算未读，收到对方回执后变已读
     };
     try { this.store.append(`p${uid}`, record); } catch (e) { this.log(`落盘失败：${e.message}`, 'warn'); }
     this._broadcast({ type: 'self-msg', chatKey: `p${uid}`, record });
@@ -386,35 +488,57 @@ export class Bridge {
     const fid = String(fileId ?? '').trim();
     if (!peerId || !fid) throw new Error('参数缺失');
     if (!this.local.friends.some((f) => String(f.user_id) === peerId)) throw new Error('只能向联系人下载文件');
+    // 下过的直接回答"已经保存到哪"，不再重新拉一遍
+    const done = this.downloadsDone.get(fid);
+    if (done && done.path && fs.existsSync(done.path)) return { started: true, exists: true, already: true, where: done.where, path: done.path };
     if (this.downloads.has(fid)) return { started: true, exists: true };
     const total = Math.max(0, Number(size) || 0);
     const safe = String(name ?? 'file').replace(/[\\/:*?"<>|]/g, '_').slice(0, 120) || 'file';
     const dest = this._uniqueDownloadPath(safe);
     const job = {
-      peerId, fileId: fid, name: safe, size: total, chunkSize: 512 * 1024,
+      peerId, fileId: fid, name: safe, size: total, chunkSize: 1024 * 1024,
       dest,
       ws: fs.createWriteStream(dest),
       seq: 0, nextWrite: 0, buf: new Map(),
-      got: 0, inFlight: new Set(), done: false, eofSeen: false, lastProgress: Date.now()
+      got: 0, inFlight: new Set(), done: false, eofSeen: false, lastProgress: Date.now(),
+      reqAt: new Map(),   // seq -> 请求时刻（块超时重传用）
+      tries: new Map()    // seq -> 重试次数
     };
     this.downloads.set(fid, job);
     this._reqMoreChunks(job);
-    job.watchdog = setInterval(() => {
-      if (Date.now() - job.lastProgress > 90000) this._abortDownload(fid, '传输超时');
-    }, 15000);
+    // 5 秒一巡检：卡住的块单独重发，整单 90 秒没有任何进展才判定超时
+    job.watchdog = setInterval(() => this._pumpDownload(job), 5000);
     this.log(`开始下载 ${safe}（来自 ${peerId}）`);
     return { started: true };
+  }
+
+  /** 巡检在途块：超过 12 秒没回来的重发，重试 6 次仍失败就中止（弱网/隧道抖动自愈）。 */
+  _pumpDownload(job) {
+    if (job.done) return;
+    const now = Date.now();
+    if (now - job.lastProgress > 90000) { this._abortDownload(job.fileId, '传输超时（90 秒无进展）'); return; }
+    for (const seq of [...job.inFlight]) {
+      const at = job.reqAt.get(seq) ?? 0;
+      if (now - at < 12000) continue;
+      const n = (job.tries.get(seq) ?? 0) + 1;
+      if (n > 6) { this._abortDownload(job.fileId, `第 ${seq} 块重试 6 次仍失败`); return; }
+      job.tries.set(seq, n);
+      job.reqAt.set(seq, now);
+      const ok = this.link.sendFrame(job.peerId, { type: 'file-req', fileId: job.fileId, seq, chunkSize: job.chunkSize });
+      if (!ok) { this._abortDownload(job.fileId, '对方设备离线，无法继续传输'); return; }
+    }
   }
 
   /** 并发窗口：同时挂 6 个块请求在管道里（多路并行，管道满载）。 */
   _reqMoreChunks(job) {
     if (job.done || job.eofSeen) return;
-    const WINDOW = 6;
+    const WINDOW = 10;
     while (job.inFlight.size < WINDOW) {
       const offset = job.seq * job.chunkSize;
       if (job.size && offset >= job.size) return;
       const seq = job.seq++;
       job.inFlight.add(seq);
+      job.reqAt.set(seq, Date.now());
       const ok = this.link.sendFrame(job.peerId, { type: 'file-req', fileId: job.fileId, seq, chunkSize: job.chunkSize });
       if (!ok) {
         job.inFlight.delete(seq);
@@ -430,6 +554,8 @@ export class Bridge {
     const seq = Number(f.seq);
     if (!job.inFlight.has(seq)) return;
     job.inFlight.delete(seq);
+    job.reqAt.delete(seq);
+    job.tries.delete(seq);
     if (f.eof) job.eofSeen = true;
     const buf = Buffer.from(String(f.data ?? ''), 'base64');
     job.buf.set(seq, buf);
@@ -460,8 +586,17 @@ export class Bridge {
     job.ws.end(() => {
       this.downloads.delete(job.fileId);
       try { this.link.sendFrame(job.peerId, { type: 'file-done', fileId: job.fileId }); } catch { /* ignore */ }
-      this._broadcast({ type: 'file-done', fileId: job.fileId, name: job.name, path: job.dest, size: job.size });
+      // where：给用户看的短路径（"下载/ArkTalk/xxx"），path：完整路径（供"打开"用）
+      const where = `${path.basename(this.downloadsDir)}/${job.name}`;
+      // 登记到"已下载"名册：下次进会话卡片直接显示"已保存"，不用重新拉
+      this.downloadsDone.set(job.fileId, { where, path: job.dest, size: job.size, time: Math.floor(Date.now() / 1000) });
+      this._saveDownloadsDone();
+      this._broadcast({ type: 'file-done', fileId: job.fileId, name: job.name, path: job.dest, where, size: job.size });
       this.log(`文件已保存：${job.dest}`);
+      // 顺带在本机弹一条系统提示，避免"以为没下下来"
+      try {
+        if (this._onFileSaved) this._onFileSaved(job.dest, job.name);
+      } catch { /* ignore */ }
     });
   }
 
@@ -482,6 +617,8 @@ export class Bridge {
     switch (f.type) {
       case 'file-req': {
         const fid = String(f.fileId ?? '');
+        // 只服务自己的联系人（fid 是 UUID 不可猜，但仍不该对陌生人开放读盘）
+        if (!this.local.friends.some((fr) => String(fr.user_id) === String(from))) return;
         const info = this.outFiles.get(fid);
         if (!info) { this.link.sendFrame(from, { type: 'file-abort', fileId: fid, reason: '文件不存在' }); return; }
         const seq = Number(f.seq) | 0;
@@ -490,11 +627,16 @@ export class Bridge {
         const file = path.resolve(this.filesDir, fid);
         // 路径归属校验：fileId 必须真的落在 filesDir 里，防止对端用 .. 穿越读任意文件
         if (!file.startsWith(path.resolve(this.filesDir) + path.sep)) { this.link.sendFrame(from, { type: 'file-abort', fileId: fid, reason: '文件不存在' }); return; }
+        // 并发闸门：读盘请求打满时直接丢弃（接收端 12 秒后会自动重传该块，不会丢数据）
+        if ((this._serveActive ?? 0) > 32) return;
+        this._serveActive = (this._serveActive ?? 0) + 1;
         const buf = Buffer.alloc(chunkSize);
+        const done = () => { this._serveActive = Math.max(0, (this._serveActive ?? 1) - 1); };
         fs.open(file, 'r', (err, fd) => {
-          if (err) { this.link.sendFrame(from, { type: 'file-abort', fileId: fid, reason: '文件读取失败' }); return; }
+          if (err) { done(); this.link.sendFrame(from, { type: 'file-abort', fileId: fid, reason: '文件读取失败' }); return; }
           fs.read(fd, buf, 0, chunkSize, seq * chunkSize, (err2, n) => {
             fs.close(fd, () => {});
+            done();
             if (err2 || n == null) { this.link.sendFrame(from, { type: 'file-abort', fileId: fid, reason: '文件读取失败' }); return; }
             this.link.sendFrame(from, { type: 'file-chunk', fileId: fid, seq, data: buf.subarray(0, n).toString('base64'), eof: n < chunkSize });
           });
@@ -643,6 +785,174 @@ export class Bridge {
         settings: this.local.settings ?? {}
       }, null, 1));
     } catch (e) { this.log(`本机数据保存失败：${e.message}`, 'warn'); }
+  }
+
+  // ---------- 已读 / 未读 ----------
+  _readMarksPath() { return path.join(this.store.dataDir, 'read-marks.json'); }
+
+  _loadReadMarks() {
+    try {
+      const j = JSON.parse(fs.readFileSync(this._readMarksPath(), 'utf8'));
+      const m = new Map();
+      for (const [k, v] of Object.entries(j ?? {})) if (Number(v) > 0) m.set(k, Number(v));
+      return m;
+    } catch { return new Map(); }
+  }
+
+  _saveReadMarks() {
+    try {
+      fs.writeFileSync(this._readMarksPath(), JSON.stringify(Object.fromEntries(this.readMarks), null, 1));
+    } catch (e) { this.log(`已读标记保存失败：${e.message}`, 'warn'); }
+  }
+
+  /** 给某条记录补上 read 字段：自发消息且时间不晚于"对方读到的时刻"才算已读。群聊不做回执。 */
+  _withRead(chatKey, record) {
+    if (!record?.self_sent || !/^p\d+$/.test(String(chatKey))) return record;
+    const upTo = this.readMarks.get(chatKey) ?? 0;
+    const read = Number(record.time ?? 0) <= upTo;
+    return record.read === read ? record : { ...record, read };
+  }
+
+  /** 打开会话时调用：告诉对方「我看到这里了」。离线则挂起，对方上线补发。 */
+  _sendReadReceipt(chatKey) {
+    const m = /^p(\d+)$/.exec(String(chatKey));
+    if (!m) return;                                   // 群聊暂不做回执（多成员语义不同）
+    const uid = m[1];
+    if (!this.local.friends.some((f) => String(f.user_id) === uid)) return;
+    const ts = Math.floor(Date.now() / 1000);
+    if ((this._readSent.get(chatKey) ?? 0) >= ts) return; // 同一秒内重复触发不必重发
+    if (this.link.sendRead(uid, ts)) {
+      this._readSent.set(chatKey, ts);
+      this._readPending.delete(chatKey);
+    } else {
+      this._readPending.set(chatKey, ts);             // 对方不在线：等 peer-online 补发
+    }
+  }
+
+  _flushReadPending(chatKey) {
+    const ts = this._readPending.get(chatKey);
+    if (!ts) return;
+    const m = /^p(\d+)$/.exec(chatKey);
+    if (m && this.link.sendRead(m[1], ts)) { this._readPending.delete(chatKey); this._readSent.set(chatKey, ts); }
+  }
+
+  /** 对方读了：更新标记并通知界面（界面只改自己发的消息，不动聊天内容）。 */
+  _onPeerRead(from, ts) {
+    const key = `p${from}`;
+    const cur = this.readMarks.get(key) ?? 0;
+    if (!ts || ts <= cur) return;
+    this.readMarks.set(key, ts);
+    this._saveReadMarks();
+    this._broadcast({ type: 'read', chatKey: key, upTo: ts });
+  }
+
+  // ---------- 撤回（目前只支持"还没发出去"的消息） ----------
+  _recalledPath() { return path.join(this.store.dataDir, 'recalled.json'); }
+
+  _loadRecalled() {
+    const m = new Map();
+    try {
+      const j = JSON.parse(fs.readFileSync(this._recalledPath(), 'utf8'));
+      for (const [k, arr] of Object.entries(j ?? {})) m.set(k, new Set((Array.isArray(arr) ? arr : []).map(String)));
+    } catch { /* 没有就空着 */ }
+    return m;
+  }
+
+  _saveRecalled() {
+    try {
+      const j = {};
+      for (const [k, s] of this.recalled) if (s.size) j[k] = [...s];
+      fs.writeFileSync(this._recalledPath(), JSON.stringify(j, null, 1));
+    } catch (e) { this.log(`撤回标记保存失败：${e.message}`, 'warn'); }
+  }
+
+  // ---------- 下载登记（回答"下没下过"，重启后仍然记得） ----------
+  _downloadsDonePath() { return path.join(this.store.dataDir, 'downloads-done.json'); }
+
+  _loadDownloadsDone() {
+    const m = new Map();
+    try {
+      const j = JSON.parse(fs.readFileSync(this._downloadsDonePath(), 'utf8'));
+      for (const [k, v] of Object.entries(j ?? {})) if (v && typeof v === 'object') m.set(String(k), v);
+    } catch { /* 没有就空着 */ }
+    return m;
+  }
+
+  _saveDownloadsDone() {
+    try {
+      fs.writeFileSync(this._downloadsDonePath(), JSON.stringify(Object.fromEntries(this.downloadsDone), null, 1));
+    } catch (e) { this.log(`下载登记保存失败：${e.message}`, 'warn'); }
+  }
+
+  /** 撤回一条还没发出去的消息：从发件箱删掉 + 本机标记"已撤回"。已发出的不支持。 */
+  _recallMessage({ chatKey, messageId } = {}) {
+    const key = String(chatKey ?? '');
+    if (!/^[pg]\d+$/.test(key)) throw new Error('非法会话');
+    const mid = String(messageId ?? '');
+    const rec = this.store.findById(key, mid);
+    if (!rec) throw new Error('消息不存在');
+    if (!rec.self_sent) throw new Error('只能撤回自己发的消息');
+    if (this.recalled.get(key)?.has(mid)) return { ok: true, cancelled: true };
+    const uid = key.slice(1);
+    // 唯一准许条件：还在发件箱里（一次都没发出去）。已发出待确认的也不行——对方可能已经收到。
+    if (!this.link.isQueued(uid, mid)) throw new Error('消息已发出，暂不支持撤回');
+    this.link.cancelQueued(uid, mid);
+    let set = this.recalled.get(key);
+    if (!set) this.recalled.set(key, set = new Set());
+    set.add(mid);
+    this._saveRecalled();
+    this._broadcast({ type: 'recalled', chatKey: key, messageId: mid });
+    return { ok: true, cancelled: true };
+  }
+
+  /** 保存聊天图片（灯箱里的"保存图片"）：dataURL 解码落盘到下载目录。 */
+  _saveImage({ dataUrl, name } = {}) {
+    const m = /^data:image\/([a-z0-9.+-]+);base64,(.+)$/i.exec(String(dataUrl ?? ''));
+    if (!m) throw new Error('不是有效的图片数据');
+    const ext = m[1].toLowerCase() === 'jpeg' ? 'jpg' : (m[1].split('+')[0] || 'png');
+    const buf = Buffer.from(m[2], 'base64');
+    if (!buf.length) throw new Error('图片数据为空');
+    // 图片统一按精确时间命名：IMG_20261127-201447.png（秒级时间戳，重名由 _uniqueDownloadPath 兜底）
+    const t = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const stamp = `${t.getFullYear()}${pad(t.getMonth() + 1)}${pad(t.getDate())}-${pad(t.getHours())}${pad(t.getMinutes())}${pad(t.getSeconds())}`;
+    const withExt = `IMG_${stamp}.${ext}`;
+    const dest = this._uniqueDownloadPath(withExt);
+    fs.writeFileSync(dest, buf);
+    const where = `${path.basename(this.downloadsDir)}/${path.basename(dest)}`;
+    return { where, path: dest, size: buf.length };
+  }
+
+  /** 打开文件所在位置：资源管理器定位并选中该文件（Windows）。 */
+  _openLocation({ path } = {}) {
+    const p = String(path ?? '').trim().replace(/"/g, '');
+    if (!p || !fs.existsSync(p)) throw new Error('文件不存在或尚未保存');
+    spawn('explorer.exe', ['/select,', p], { detached: true, stdio: 'ignore' }).unref();
+    return { ok: true };
+  }
+
+  /** 历史消息统一标注：撤回标记 + 已读状态 + 是否仍未送达 + 文件卡片的"下没下过"。 */
+  _annotate(chatKey, record) {
+    if (!record) return record;
+    let r = this._withRead(chatKey, record);
+    if (this.recalled.get(chatKey)?.has(String(r.message_id))) r = { ...r, recalled: true };
+    if (/^p\d+$/.test(chatKey) && r.self_sent && !r.recalled) {
+      const stillPending = this.link.isPending(chatKey.slice(1), String(r.message_id));
+      r = { ...r, queued: stillPending };
+    }
+    // 文件卡片补上"已保存"信息（卡片本体不含状态，下载登记里有就带上）
+    if (Array.isArray(r.message)) {
+      let changed = false;
+      const segs = r.message.map((seg) => {
+        if (seg?.type !== 'file' || !seg.data?.file_id) return seg;
+        const done = this.downloadsDone.get(String(seg.data.file_id));
+        if (!done || seg.data.downloaded) return seg;
+        changed = true;
+        return { ...seg, data: { ...seg.data, downloaded: true, where: done.where, dpath: done.path } };
+      });
+      if (changed) r = { ...r, message: segs };
+    }
+    return r;
   }
 
   _helloPayload() {

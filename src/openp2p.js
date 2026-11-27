@@ -7,7 +7,7 @@
 //   · OpenP2P 先尝试 P2P 打洞（UDP/TCP、NAT1-4、IPv6），打不通自动用公共共享节点中继
 //
 // 令牌：到 console.openp2p.cn 注册后复制，两台设备填同一个即可互通。
-import { spawn, exec } from 'node:child_process';
+import { spawn, exec, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -96,6 +96,9 @@ export class OpenP2PManager {
     this.log(`OpenP2P：启动穿透（节点 arktalk-${selfId}，${apps.length} 条隧道）`, 'info');
     try {
       this._ensureInvokerLayer();
+      // 同节点名的两个实例会在服务端互相踢下线（表现为「已登录但对端离线」），
+      // 启动前把本目录下残留的旧实例全部清掉（proc.kill 在 Windows 上不一定真能杀掉）。
+      this._stopStray();
       // CLI 参数再兜底一遍（配置文件万一被别的实例改写也不失联）
       this.proc = spawn(this.exePath, ['-node', `arktalk-${selfId}`, '-token', tokenStr],
         { cwd: this.workDir, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
@@ -134,7 +137,25 @@ export class OpenP2PManager {
   stop() {
     this._stoppedByUs = true;
     if (this.proc) { try { this.proc.kill(); } catch { /* ignore */ } this.proc = null; }
+    this._stopStray();
     this.status = '未运行';
+  }
+
+  /**
+   * 清掉与本身 exe 同路径的残留实例（Windows）。
+   * 为什么需要：同一个节点名 arktalk-<账号> 在服务器上只允许一个连接，
+   * 两个实例会互相踢下线，症状就是「手机显示已登录，电脑这边对端一直离线」。
+   */
+  _stopStray() {
+    if (process.platform !== 'win32') return;
+    const exe = path.resolve(this.exePath);
+    const ps = `Get-CimInstance Win32_Process -Filter "Name='openp2p.exe'" | `
+      + `Where-Object { $_.ExecutablePath -eq '${exe.replace(/'/g, "''")}' } | `
+      + 'ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }';
+    try {
+      execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps],
+        { timeout: 5000, windowsHide: true, stdio: 'ignore' });
+    } catch { /* 清不掉也不阻塞启动 */ }
   }
 
   _pump(buf, level) {

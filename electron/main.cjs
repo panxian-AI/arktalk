@@ -10,6 +10,20 @@ const PORT = 3020;
 const URL_BASE = `http://127.0.0.1:${PORT}`;
 const APP_NAME = 'ArkTalk';
 
+// 兜底：主进程里任何一个未捕获异常（典型的是一条异常消息帧把 ws 回调打穿）
+// 默认会直接结束进程 = 界面"闪退"。这里落盘 + 继续运行，聊天窗口不会因此消失。
+function logCrash(kind, err) {
+  try {
+    const fs = require('node:fs');
+    const dir = path.join(__dirname, '..', 'diag');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(path.join(dir, 'crash.log'),
+      `[${new Date().toLocaleString('zh-CN', { hour12: false })}] ${kind}\n${err?.stack || err}\n\n`);
+  } catch { /* 记录失败也不能再抛 */ }
+}
+process.on('uncaughtException', (err) => { logCrash('uncaughtException', err); console.error('[crash]', err); });
+process.on('unhandledRejection', (err) => { logCrash('unhandledRejection', err); console.error('[reject]', err); });
+
 // 禁用 GPU 硬件加速：远程桌面/远控（ToDesk、向日葵、RDP）会话里 Electron 的 GPU
 // 渲染经常失效导致窗口全白；聊天界面走 CPU 渲染毫无压力。必须在 app ready 前调用。
 app.disableHardwareAcceleration();
@@ -49,19 +63,40 @@ function fetchStatus() {
   });
 }
 
+let bridgeStarting = false;
+
 async function ensureBridge() {
   if (await bridgeUp()) return; // 已有实例在跑（比如你开着 npm start），直接复用，不抢端口
-  serverChild = spawn('node', ['src/main.js'], {
-    cwd: app.getAppPath(),
-    stdio: 'inherit',
-    windowsHide: true
-  });
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    if (await bridgeUp()) return;
-    await new Promise((r) => setTimeout(r, 300));
+  if (bridgeStarting) return;
+  bridgeStarting = true;
+  try {
+    // 打包成 exe 后系统里不一定有 node：用 Electron 自带的 Node 运行时跑桥
+    // （ELECTRON_RUN_AS_NODE=1 会让 electron.exe 以纯 Node 模式执行，不打开窗口）
+    const packaged = app.isPackaged;
+    serverChild = spawn(packaged ? process.execPath : 'node', ['src/main.js'], {
+      cwd: app.getAppPath(),
+      stdio: 'inherit',
+      windowsHide: true,
+      env: packaged ? { ...process.env, ELECTRON_RUN_AS_NODE: '1' } : process.env
+    });
+    // 桥自己挂掉（未捕获异常 / 端口被抢 / 上游崩）时自动拉起：
+    // 否则窗口会一直白屏，只能手动重启整个应用。
+    serverChild.on('exit', (code, signal) => {
+      serverChild = null;
+      if (isQuitting) return;
+      logCrash('bridge-exit', new Error(`本地桥退出 code=${code} signal=${signal}`));
+      setTimeout(() => { ensureBridge().catch(() => {}); }, 2000);
+    });
+    serverChild.on('error', (err) => logCrash('bridge-spawn', err));
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      if (await bridgeUp()) return;
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    throw new Error('本地桥 15 秒内没起来：检查 config.json（端口占用/上游配置），日志见上面输出');
+  } finally {
+    bridgeStarting = false;
   }
-  throw new Error('本地桥 15 秒内没起来：检查 config.json（端口占用/上游配置），日志见上面输出');
 }
 
 function createWindow() {
@@ -77,6 +112,29 @@ function createWindow() {
     webPreferences: { contextIsolation: true, nodeIntegration: false }
   });
   win.loadURL(URL_BASE);
+
+  // 渲染进程崩溃 / 卡死 / 白屏自愈：Electron 的渲染进程（Chromium）偶尔会因为显存、
+  // 显卡驱动、远程桌面切换而挂掉——表现是窗口变白，但进程还在。这里自动重载。
+  win.webContents.on('render-process-gone', (_e, details) => {
+    logCrash('renderer-gone', new Error(JSON.stringify(details)));
+    if (!isQuitting) setTimeout(() => { if (win && !win.isDestroyed()) win.reload(); }, 800);
+  });
+  win.on('unresponsive', () => {
+    logCrash('renderer-unresponsive', new Error('界面无响应'));
+    if (!isQuitting && win) win.reload();
+  });
+  let failLoads = 0;
+  win.webContents.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
+    if (isQuitting || !isMainFrame) return;
+    failLoads += 1;
+    if (failLoads > 30) return; // 最多重试 30 次（约 45 秒），避免死循环
+    setTimeout(async () => {
+      if (isQuitting || !win || win.isDestroyed()) return;
+      try { await ensureBridge(); } catch { /* 起不来就等下一次 */ }
+      if (win && !win.isDestroyed()) win.loadURL(URL_BASE);
+    }, 1500);
+  });
+  win.webContents.on('did-finish-load', () => { failLoads = 0; });
 
   // 关窗不退出：收进托盘，桥和穿透继续运行（不然关窗就掉线，消息收不到）
   win.on('close', (e) => {
@@ -144,12 +202,25 @@ function buildTrayMenu(status) {
       label: '刷新状态',
       click: () => refreshTray(true)
     },
+    {
+      label: '重启 ArkTalk',
+      toolTip: '完全退出并重新启动（界面卡死/收不到消息时用）',
+      click: () => restartApp()
+    },
     { type: 'separator' },
     {
       label: '退出 ArkTalk',
       click: () => { isQuitting = true; app.quit(); }
     }
   ]);
+}
+
+/** 从托盘完整重启：先标记退出（避免关窗被拦截成 hide），再由 Electron 重新拉起自己。 */
+function restartApp() {
+  try { logCrash('tray-restart', new Error('托盘手动重启')); } catch { /* ignore */ }
+  isQuitting = true;
+  app.relaunch({ args: process.argv.slice(1) });
+  app.exit(0);
 }
 
 async function refreshTray(force = false) {
@@ -181,7 +252,18 @@ function createTray() {
   tray.on('double-click', () => showWindow());
 
   refreshTray();
-  statusTimer = setInterval(() => { refreshTray(); }, 20_000);
+  statusTimer = setInterval(async () => {
+    await refreshTray();
+    // 守护：桥断了（进程被杀、端口异常）自动拉起，界面若还在旧页面就重载一次
+    if (isQuitting) return;
+    if (!(await bridgeUp())) {
+      logCrash('bridge-watchdog', new Error('本地桥无响应，尝试重启'));
+      try {
+        await ensureBridge();
+        if (win && !win.isDestroyed()) win.loadURL(URL_BASE);
+      } catch (e) { logCrash('bridge-watchdog-fail', e); }
+    }
+  }, 20_000);
 }
 
 // 单实例：多开会让托盘出现两个图标且互抢端口

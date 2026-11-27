@@ -13,6 +13,7 @@ let chats = [];        // [{chatKey, lastTime, lastPreview, unread}]
 let activeChat = null; // {key, type:'p'|'g', id, name, avatar}
 let peers = {};        // accountId -> 是否设备在线（P2P 直连）
 let modalMode = null;  // 当前弹窗：friends | create-group | profile | null
+let restoredOnce = false; // 是否已经做过"恢复上次会话"（只在首条 hello 做一次）
 const chatCache = new Map(); // chatKey -> {messages:[], loadedRemote}
 
 /* ---------- 头像：本机生成（SVG data URI，零网络请求）；
@@ -29,14 +30,25 @@ const avatarOfGroup = (gid, name) => localAvatar(name ?? `群 ${gid}`, gid);
 
 /* ---------- 连接 ---------- */
 async function boot() {
-  uiCfg = await fetch('/api/config').then((r) => r.json());
-  connect(new URL(`/ws?token=${uiCfg.uiToken}`, location.href.replace(/^http/, 'ws')).href);
+  // 桥可能在重启（崩溃自动拉起/手动重启）：拉配置失败不能让重连链断掉，
+  // 否则界面会永久停在旧状态（"收不到消息"但桥其实一直在收）。
+  try {
+    uiCfg = await fetch('/api/config').then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
+    connect(new URL(`/ws?token=${uiCfg.uiToken}`, location.href.replace(/^http/, 'ws')).href);
+  } catch {
+    setTimeout(boot, 2000);
+  }
 }
 function connect(url) {
   ws = new WebSocket(url);
   ws.onopen = () => setStatus(true);
   ws.onclose = () => { setStatus(false); setTimeout(boot, 2000); };
-  ws.onmessage = (e) => handleFrame(JSON.parse(e.data));
+  ws.onmessage = (e) => {
+    // 单帧处理出错不能连累整条连接：否则一次渲染异常就再也收不到消息
+    let m;
+    try { m = JSON.parse(e.data); } catch { return; }
+    try { handleFrame(m); } catch (err) { console.error('handleFrame', err, m?.type); }
+  };
 }
 function setStatus(on) {
   $('conn-dot').className = `dot ${on ? 'on' : 'off'}`;
@@ -49,6 +61,22 @@ function handleFrame(m) {
       selfInfo = m.self; friends = m.friends ?? []; groups = m.groups ?? []; chats = m.chats ?? [];
       peers = m.peers ?? {};
       renderSelf(); renderList(); updatePeerPill();
+      // 首次 hello：恢复上次聊到一半的会话（手机端文件选择器导致页面重载时，不至于被甩回列表）
+      if (!restoredOnce) {
+        restoredOnce = true;
+        const last = localStorage.getItem('ark.lastChat');
+        if (last && !activeChat) {
+          const id = last.slice(1);
+          const ok = last[0] === 'g'
+            ? (groups ?? []).some((g) => String(g.group_id) === id)
+            : (friends ?? []).some((f) => String(f.user_id) === id);
+          if (ok) { try { openChat(last); } catch { /* 列表还没就绪就算了 */ } }
+        }
+      } else if (activeChat) {
+        // 断线重连后的 hello：把当前会话的记录补拉一遍（掉线期间漏掉的 event 帧不会再来）
+        send({ type: 'history', chatKey: activeChat.key, limit: 50 });
+        send({ type: 'read', chatKey: activeChat.key });
+      }
       break;
     }
     case 'peers': {
@@ -62,11 +90,29 @@ function handleFrame(m) {
     case 'history': onHistory(m); break;
     case 'action-result': onActionResult(m); break;
     case 'self-msg': upsertLocal(m.chatKey, m.record); break;
+    case 'read': { // 对方已读回执：把我方消息标成已读
+      chats.forEach((c) => { if (c.chatKey === m.chatKey) c.readUpTo = m.upTo; });
+      const cache = chatCache.get(m.chatKey);
+      if (cache) {
+        let changed = false;
+        cache.messages.forEach((x) => {
+          if (x.self_sent && Number(x.time ?? 0) <= m.upTo && !x.read) { x.read = true; changed = true; }
+        });
+        if (changed && activeChat?.key === m.chatKey) renderMessages(cache.messages);
+      }
+      break;
+    }
     case 'unread': chats.forEach((c) => { if (m.unread[c.chatKey] !== undefined) c.unread = m.unread[c.chatKey]; }); renderList(); break;
+    case 'recalled': markRecalled(m.chatKey, m.messageId); break;
     case 'file-progress': setFileStatus(m.fileId, m.size ? `接收中 ${Math.floor((m.received / m.size) * 100)}%` : `接收中 ${fmtSize(m.received)}`); break;
-    case 'file-done': setFileStatus(m.fileId, '已保存 ✓'); break;
+    case 'file-done': {
+      const where = m.where || m.path || '';
+      setFileDone(m.fileId, where, m.path);
+      break;
+    }
     case 'file-ack': setFileStatus(m.fileId, '对方已接收 ✓'); break;
     case 'file-error': setFileStatus(m.fileId, `失败：${m.error ?? '传输中止'}`); break;
+    case 'send-hint': $('send-hint').textContent = m.text ?? ''; if (m.text) setTimeout(() => { $('send-hint').textContent = ''; }, 6000); break;
   }
 }
 
@@ -79,12 +125,31 @@ function updatePeerPill() {
     dot.hidden = false;
     dot.className = `on-dot ${peers[String(activeChat.id)] ? 'on' : 'off'}`;
     dot.title = peers[String(activeChat.id)] ? '在线（P2P 直连）' : '离线（消息会排队）';
+    // 副标题写成文字：光靠圆点很容易误判"看不到在线"
+    const sub = $('chat-sub');
+    if (sub) sub.textContent = `账号 ${activeChat.id} · ${peers[String(activeChat.id)] ? '在线（P2P 直连）' : '离线（消息会排队）'}`;
   } else if (dot) {
     dot.hidden = true;
   }
+  updateOnlineBar();
   if (!activeChat || activeChat.type !== 'private') { pill.hidden = true; return; }
   const online = peers[String(activeChat.id)];
   pill.hidden = online !== false; // 只有明确离线才提示
+}
+
+/** 侧栏顶部的在线概览：在线 N/M 与具体账号，避免"看不出来谁在线"。 */
+function updateOnlineBar() {
+  const bar = $('online-bar');
+  if (!bar) return;
+  const list = Array.isArray(friends) ? friends : [];
+  const on = list.filter((f) => peers[String(f.user_id)]).map((f) => String(f.user_id));
+  bar.hidden = list.length === 0;
+  if (!list.length) return;
+  bar.className = `online-bar ${on.length ? 'has-on' : ''}`;
+  bar.innerHTML = on.length
+    ? `<span class="ob-dot on"></span>在线 ${on.length}/${list.length}${on.length < list.length ? ` · <span class="ob-dim">离线 ${list.length - on.length}</span>` : ''}`
+    : `<span class="ob-dot off"></span>联系人都离线（消息会排队）`;
+  bar.title = on.length ? `在线账号：${on.join('、')}` : '当前没有任何联系人可达';
 }
 
 /* ---------- 群成员面板（QQ NT 右侧栏） ---------- */
@@ -150,7 +215,11 @@ function upsertLocal(chatKey, record) {
   chat.lastPreview = previewLocal(record);
   if (!record.self_sent && activeChat?.key !== chatKey) chat.unread = (chat.unread ?? 0) + 1;
   renderList();
-  if (activeChat?.key === chatKey) appendMessage(record);
+  if (activeChat?.key === chatKey) {
+    appendMessage(record);
+    // 正开着这个会话又收到新消息：立即回已读，不让对方干等"未读"
+    if (!record.self_sent) send({ type: 'read', chatKey });
+  }
 }
 
 /* ---------- 消息渲染 ---------- */
@@ -207,7 +276,7 @@ function renderList() {
       const c = chats.find((x) => x.chatKey === key);
       const name = f.remark || f.nickname || `账号 ${f.user_id}`;
       box.appendChild(itemEl(key, avatarOfUser(f.user_id, name), name,
-        c?.lastPreview ?? '', '', c?.unread ?? 0, { delete: () => confirmRemoveFriend(f.user_id, name) }));
+        c?.lastPreview || (peers[String(f.user_id)] ? '在线 · 可直连' : '离线 · 消息会排队'), '', c?.unread ?? 0, { delete: () => confirmRemoveFriend(f.user_id, name) }));
     }
     if (!friends.length) box.innerHTML = '<div class="list-empty">还没有联系人<br>点右上角 ＋ 添加</div>';
   } else if (tab === 'groups') {
@@ -372,19 +441,48 @@ function messageEl(msg) {
   row.className = 'row' + (mine ? ' mine' : '');
   const uin = msg.sender?.user_id ?? msg.user_id;
   const name = mine ? (selfInfo?.nickname || '我') : (msg.sender?.card || msg.sender?.nickname || `账号 ${uin}`);
+  // 私聊才有已读回执：自己发的消息在气泡下角标"已读/未读"（群聊收不到回执，不标）
+  const readMark = mine && activeChat?.type === 'private'
+    ? `<div class="read-mark ${msg.read ? 'is-read' : ''}">${msg.read ? '已读' : '未读'}</div>` : '';
+  // 撤回按钮：只给自己发的、还没送达的消息（桥会校验，已发出的会拒绝）
+  const recallBtn = (mine && msg.queued && !msg.recalled)
+    ? '<button class="msg-quote-btn recall-btn" title="撤回这条消息">撤回</button>' : '';
   row.innerHTML = `<img class="avatar" src="${esc(avatarOfUser(uin, name))}" onerror="this.style.visibility='hidden'">
     <div class="bubble-wrap">
       <div class="sender">${esc(name)} · ${esc(fmtTime(msg.time))}</div>
       <div class="bubble ${msg.recalled ? 'recalled' : ''}">${msg.recalled ? '（已撤回）' : renderSegments(msg.message, mine)}</div>
+      ${readMark}
     </div>
-    ${msg.recalled ? '' : '<button class="msg-quote-btn" title="引用这条消息">引用</button>'}`;
+    ${msg.recalled ? '' : recallBtn + '<button class="msg-quote-btn" title="引用这条消息">引用</button>'}`;
   row.querySelector('.msg-quote-btn')?.addEventListener('click', () => setReply(msg));
+  row.querySelector('.recall-btn')?.addEventListener('click', () => recallMessage(msg));
   return row;
+}
+
+/** 撤回一条还没发出去的消息（对方离线时排队中的）。 */
+function recallMessage(msg) {
+  if (!activeChat) return;
+  rpc('recall-message', { chatKey: activeChat.key, messageId: msg.message_id })
+    .catch((e) => { alert(`撤回失败：${e.message}`); });
 }
 
 /* ---------- 文件：发（📎 上传→发卡片）与收（点保存才拉取） ---------- */
 function setFileStatus(fid, text) {
   document.querySelectorAll(`[data-fstatus="${CSS.escape(String(fid))}"]`).forEach((el) => { el.textContent = text; });
+}
+/** 下载完成：显示保存路径 + 附带"打开位置"按钮（资源管理器/下载应用直达）。 */
+function setFileDone(fid, where, fullPath) {
+  document.querySelectorAll(`[data-fstatus="${CSS.escape(String(fid))}"]`).forEach((el) => {
+    el.textContent = where ? `已保存：${where}` : '已保存 ✓';
+    if (where) el.title = where;
+    if (fullPath && !el.parentElement.querySelector('.loc-btn')) {
+      const b = document.createElement('button');
+      b.className = 'mini loc-btn';
+      b.textContent = '📁 位置';
+      b.dataset.loc = fullPath;
+      el.after(b);
+    }
+  });
 }
 function uploadFile(file, onProgress) {
   return new Promise((resolve, reject) => {
@@ -399,6 +497,13 @@ function uploadFile(file, onProgress) {
 $('btn-file').onclick = () => {
   if (!activeChat) return;
   if (activeChat.type !== 'private') { $('send-hint').textContent = '文件暂只支持私聊'; setTimeout(() => { $('send-hint').textContent = ''; }, 3000); return; }
+  // 安卓端走原生选择：桥直接收发，页面不参与 —— 系统选择器把页面盖住/Activity 重建都不影响发送
+  if (window.arkNative) {
+    rpc('pick-file', { kind: 'any', userId: Number(activeChat.id) })
+      .then(() => { $('send-hint').textContent = '请在系统文件选择器中选择要发送的文件…'; setTimeout(() => { $('send-hint').textContent = ''; }, 8000); })
+      .catch((e) => { $('send-hint').textContent = `文件发送失败：${e.message}`; setTimeout(() => { $('send-hint').textContent = ''; }, 4000); });
+    return;
+  }
   $('file-input').click();
 };
 $('file-input').addEventListener('change', async () => {
@@ -416,6 +521,13 @@ $('file-input').addEventListener('change', async () => {
   }
 });
 $('messages').addEventListener('click', async (e) => {
+  const loc = e.target.closest('.loc-btn');
+  if (loc) {
+    try {
+      await rpc('open-location', { path: loc.dataset.loc });
+    } catch (err) { alert(`打开位置失败：${err.message}`); }
+    return;
+  }
   const btn = e.target.closest('.dl-btn');
   if (!btn || btn.disabled) return;
   btn.disabled = true;
@@ -476,16 +588,15 @@ function renderSegments(segs, mine = false) {
         break;
       }
       case 'video': html += d.url ? `<video controls src="${esc(d.url)}" style="max-width:220px;border-radius:6px"></video>` : '<span style="color:var(--text-sub)">[视频]</span>'; break;
-      case 'file': html += `<div class="card-seg">[文件] ${esc(d.name ?? d.file_id ?? '')}</div>`; break;
       case 'file': {
         const fid = String(d.file_id ?? '');
         const nm = String(d.name ?? '文件');
         const sz = fmtSize(d.size);
-        const status = `<span class="file-status" data-fstatus="${esc(fid)}"></span>`;
-        html += mine
-          ? `<div class="card-seg file-card">📎 ${esc(nm)}（${sz}）${status}</div>`
-          : `<div class="card-seg file-card">📎 ${esc(nm)}（${sz}）
-              <button class="mini primary dl-btn" data-dl="${esc(fid)}" data-name="${esc(nm)}" data-size="${esc(d.size ?? 0)}">保存</button>${status}</div>`;
+        // 下过的文件直接显示"已保存"路径，不再误导人重新下载；按钮保留可重下
+        const status = `<span class="file-status" data-fstatus="${esc(fid)}">${d.downloaded ? `已保存：${esc(d.where ?? '')}` : ''}</span>`;
+        const dlBtn = mine ? '' : `<button class="mini primary dl-btn" data-dl="${esc(fid)}" data-name="${esc(nm)}" data-size="${esc(d.size ?? 0)}">${d.downloaded ? '重新下载' : '保存'}</button>`;
+        const locBtn = d.downloaded && d.dpath ? `<button class="mini loc-btn" data-loc="${esc(d.dpath)}" title="打开文件所在位置">📁 位置</button>` : '';
+        html += `<div class="card-seg file-card">📎 ${esc(nm)}（${sz}）${dlBtn}${locBtn}${status}</div>`;
         break;
       }
       case 'json': case 'ark': html += `<div class="card-seg">[卡片消息]</div>`; break;
@@ -708,9 +819,13 @@ $('rail-avatar').onclick = () => {
       <button class="mini" id="pf-op2p-save">保存</button>
     </div>
     <div class="op2p-diag">
-      <div class="diag-head"><span id="pf-op2p-dot" class="on-dot off"></span><span id="pf-op2p-status">穿透状态：读取中…</span><button class="mini" id="pf-op2p-refresh">刷新</button></div>
+      <div class="diag-head"><span id="pf-op2p-dot" class="on-dot off"></span><span id="pf-op2p-status">穿透状态：读取中…</span><button class="mini" id="pf-op2p-diag">诊断包</button><button class="mini" id="pf-op2p-refresh">刷新</button></div>
       <pre class="diag-log" id="pf-op2p-log"></pre>
     </div>
+    ${window.arkNative ? `<div class="op2p-diag">
+      <div class="diag-head"><span id="pf-dns-dot" class="on-dot off"></span><span id="pf-dns-status">DNS 修复：读取中…</span><button class="mini" id="pf-dns-btn">开启</button></div>
+      <div class="pf-hint">有些运营商（如广电物联网卡）会拦截境外 DNS，穿透程序只会卡在「等待登录…」。开启后只接管公共 DNS 的 53 端口查询、改用本机运营商 DNS，不影响其它上网流量。</div>
+    </div>` : ''}
     <div class="form-err" id="pf-err" hidden></div>
     <div class="modal-actions"><button class="ghost" id="pf-cancel">取消</button><button id="pf-ok">保存</button></div>`);
   $('pf-cancel').onclick = closeModal;
@@ -753,6 +868,56 @@ $('rail-avatar').onclick = () => {
   };
   refreshRelayStatus();
   $('pf-op2p-refresh').onclick = refreshRelayStatus;
+  $('pf-op2p-diag').onclick = async () => {
+    const btn = $('pf-op2p-diag');
+    btn.textContent = '采集中…';
+    try {
+      const r = await rpc('diag-pack');
+      const txt = JSON.stringify(r, null, 1);
+      const logEl = $('pf-op2p-log');
+      if (logEl) logEl.textContent = (r && r.file ? `📄 已保存文件：${r.file}\n\n` : '') + txt;
+      const ok = await copyText(txt);
+      btn.textContent = ok ? '已复制' : '已生成';
+    } catch (e) {
+      btn.textContent = '失败';
+      const logEl = $('pf-op2p-log');
+      if (logEl) logEl.textContent = `诊断包生成失败：${e.message}`;
+    }
+    setTimeout(() => { const b = $('pf-op2p-diag'); if (b) b.textContent = '诊断包'; }, 2500);
+  };
+
+  // DNS 修复隧道（仅安卓原生壳里有）：接管穿透程序发出的 DNS 查询
+  const refreshDnsStatus = async () => {
+    const st = $('pf-dns-status');
+    if (!st) return;
+    try {
+      const r = await rpc('dns-tunnel');
+      const dot = $('pf-dns-dot');
+      dot.className = `on-dot ${r.running ? 'on' : 'off'}`;
+      if (r.running) {
+        st.textContent = `✅ 已开启｜接管 ${r.intercepted || 0} 次查询｜上游 ${r.upstream || '读取中'}`;
+      } else if (r.otherVpn) {
+        st.textContent = '⚠️ 检测到其它 VPN 正在运行，请先关闭再开启';
+      } else if (!r.authorized) {
+        st.textContent = '⚠️ 未授权（点「开启」按提示允许 VPN）';
+      } else {
+        st.textContent = `⚠️ 未开启${r.err ? '：' + r.err : ''}`;
+      }
+      const btn = $('pf-dns-btn');
+      if (btn) btn.textContent = r.running ? '重启' : '开启';
+    } catch (e) {
+      st.textContent = `⚠️ 读取失败：${e.message}`;
+    }
+  };
+  refreshDnsStatus();
+  if ($('pf-dns-btn')) {
+    $('pf-dns-btn').onclick = () => {
+      // 自定义 scheme 交给原生壳处理（授权 → 起隧道服务）
+      location.href = 'arktalk://dns-fix';
+      setTimeout(refreshDnsStatus, 1500);
+      setTimeout(refreshDnsStatus, 4000);
+    };
+  }
   $('pf-avatar-input').addEventListener('change', () => {
     const file = $('pf-avatar-input').files[0];
     if (file) shrinkImage(file, 128).then((u) => { $('pf-avatar').src = u; }).catch(() => {});
@@ -915,19 +1080,106 @@ async function sendSeg(seg, hintWhileSending = '') {
   }
 }
 
-$('btn-image').onclick = () => $('image-input').click();
+/* ---------- 图片：发（压缩/原图）与看（点击放大、保存） ---------- */
+// 原图开关：勾选后跳过 canvas 压缩，按原文件字节发（>25MB 自动转压缩，防止撑爆 P2P 帧）
+let sendOriginal = localStorage.getItem('ark.original') === '1';
+function renderOriginalBtn() {
+  const b = $('btn-original');
+  if (b) { b.classList.toggle('active', sendOriginal); b.title = sendOriginal ? '原图模式已开启（点击关闭，恢复压缩）' : '发送原图（不压缩）'; }
+}
+renderOriginalBtn();
+$('btn-original').onclick = () => {
+  sendOriginal = !sendOriginal;
+  localStorage.setItem('ark.original', sendOriginal ? '1' : '0');
+  renderOriginalBtn();
+};
+
+/** 原样读取文件为 dataURL（不重编码，保真）。 */
+function readFileAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result));
+    r.onerror = () => reject(new Error('图片读取失败'));
+    r.readAsDataURL(file);
+  });
+}
+
+$('btn-image').onclick = () => {
+  // 安卓端走原生选择（压缩/原图都在桥里完成，页面不参与）
+  if (window.arkNative && activeChat) {
+    rpc('pick-file', { kind: 'image', userId: Number(activeChat.id), original: sendOriginal })
+      .then(() => { $('send-hint').textContent = '请在系统选择器中选择图片…'; setTimeout(() => { $('send-hint').textContent = ''; }, 8000); })
+      .catch((e) => { $('send-hint').textContent = `图片发送失败：${e.message}`; setTimeout(() => { $('send-hint').textContent = ''; }, 4000); });
+    return;
+  }
+  $('image-input').click();
+};
 $('image-input').addEventListener('change', async () => {
   const file = $('image-input').files[0];
   if (!file || !activeChat) return;
   $('image-input').value = '';
   try {
-    const dataUrl = await compressImage(file, 1280);
-    await sendSeg({ type: 'image', data: { url: dataUrl } }, '图片发送中…');
+    let dataUrl, isOriginal = false;
+    if (sendOriginal && file.size <= 25 * 1024 * 1024) {
+      dataUrl = await readFileAsDataURL(file);
+      isOriginal = true;
+    } else {
+      if (sendOriginal && file.size > 25 * 1024 * 1024) {
+        $('send-hint').textContent = '原图超过 25MB，已自动转为压缩发送';
+        setTimeout(() => { $('send-hint').textContent = ''; }, 3000);
+      }
+      dataUrl = await compressImage(file, 1280);
+    }
+    await sendSeg({ type: 'image', data: { url: dataUrl, ...(isOriginal ? { original: true } : {}) } }, '图片发送中…');
   } catch (e) {
     $('send-hint').textContent = `图片发送失败：${e.message}`;
     setTimeout(() => { $('send-hint').textContent = ''; }, 4000);
   }
 });
+
+/* ---------- 图片灯箱：点聊天里的图片放大看 + 一键保存 ---------- */
+let lightboxUrl = '';
+let lightboxName = '图片.png';
+let lightboxSavedPath = '';
+function openLightbox(src, name = '图片.png') {
+  lightboxUrl = src;
+  lightboxName = String(name || '图片.png').replace(/[\\/:*?"<>|]/g, '_');
+  lightboxSavedPath = '';
+  $('lightbox-img').src = src;
+  $('lightbox-save').textContent = '保存图片';
+  $('lightbox-open').hidden = true;
+  $('lightbox').hidden = false;
+}
+function closeLightbox() {
+  $('lightbox').hidden = true;
+  $('lightbox-img').src = '';
+  lightboxUrl = '';
+}
+// 事件委托：聊天区里的图片点击即放大（含历史消息重渲染后的新节点）
+$('messages').addEventListener('click', (e) => {
+  const img = e.target.closest('.image-seg');
+  if (img?.src) openLightbox(img.src);
+});
+$('lightbox-close').onclick = closeLightbox;
+$('lightbox').addEventListener('click', (e) => { if (e.target === $('lightbox')) closeLightbox(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('lightbox').hidden) closeLightbox(); });
+$('lightbox-save').onclick = async () => {
+  if (!lightboxUrl) return;
+  try {
+    const res = await rpc('save-image', { dataUrl: lightboxUrl, name: lightboxName });
+    $('lightbox-save').textContent = res?.where ? `已保存：${res.where}` : '已保存';
+    if (res?.path) lightboxSavedPath = res.path;
+    // 电脑端有精确路径可定位；安卓端 open-location 直接开"下载"应用，无需路径
+    $('lightbox-open').hidden = !(lightboxSavedPath || window.arkNative);
+  } catch (e) {
+    alert(`保存失败：${e.message}`);
+  }
+};
+$('lightbox-open').onclick = async () => {
+  if (!lightboxSavedPath && !window.arkNative) return;
+  try { await rpc('open-location', { path: lightboxSavedPath }); }
+  catch (e) { alert(`打开位置失败：${e.message}`); }
+};
 
 /* ---------- 语音：点 🎤 开始录音，再点一次发送，Esc 取消，最长 60 秒 ---------- */
 let recState = null;
@@ -992,5 +1244,11 @@ $('btn-voice').onclick = () => {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && recState) { e.preventDefault(); stopRecording(true); }
 });
+
+// 安卓原生壳用：点通知后直接进入对应会话
+window.arkOpenChat = (id) => {
+  const key = 'p' + String(id);
+  try { openChat(key); } catch { /* 联系人还没加载完就忽略 */ }
+};
 
 boot();

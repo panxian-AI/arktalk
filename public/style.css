@@ -255,3 +255,51 @@ body { font: 14px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; color: var(--te
 @media (max-width: 760px) {
   .item-del { opacity: 1; width: 34px; height: 34px; font-size: 15px; }
 }
+
+/* 侧栏顶部的在线概览（谁在线一眼可见，不靠猜圆点） */
+#online-bar { margin: 0 10px 6px; padding: 6px 10px; border-radius: 8px; font-size: 12px; line-height: 1.5;
+  color: var(--text-sub); background: var(--hover); display: flex; align-items: center; gap: 6px; }
+#online-bar.has-on { color: #1a7f37; background: rgba(52,199,89,.10); }
+#online-bar[hidden] { display: none; }
+#online-bar .ob-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+#online-bar .ob-dot.on { background: #34c759; }
+#online-bar .ob-dot.off { background: #c1c6cd; }
+#online-bar .ob-dim { color: var(--text-sub); }
+
+/* 已读 / 未读回执（私聊自己发的消息右下角小字） */
+.read-mark { align-self: flex-end; font-size: 11px; line-height: 1.2; color: var(--text-sub); user-select: none; }
+.read-mark.is-read { color: var(--accent); }
+
+/* 撤回按钮（红色小字，与引用按钮同款式） */
+.recall-btn { color: #d33 !important; }
+
+/* ---------- 图片：原图开关 / 灯箱 / 触屏适配 ---------- */
+#btn-original { font-size: 12px; }
+#btn-original.active { color: #fff; background: var(--accent); border-color: var(--accent); }
+.image-seg { cursor: zoom-in; }
+
+#lightbox { position: fixed; inset: 0; z-index: 1000; background: rgba(0,0,0,.88);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; }
+#lightbox[hidden] { display: none; }
+#lightbox-img { max-width: 94vw; max-height: 82vh; object-fit: contain; border-radius: 6px; box-shadow: 0 8px 40px rgba(0,0,0,.5); }
+#lightbox-bar { display: flex; gap: 10px; }
+#lightbox-bar .mini { padding: 8px 18px; font-size: 14px; background: #fff; border: 0; border-radius: 8px; cursor: pointer; }
+#lightbox-bar .primary { background: var(--accent); color: #fff; }
+
+/* 触屏设备：引用/撤回按钮不靠 hover，直接显示在气泡旁；回执字号加大一点 */
+@media (pointer: coarse) {
+  .msg-quote-btn { position: static; opacity: 1; margin: 0 6px 0 2px; align-self: center; white-space: nowrap; }
+  .row.mine .msg-quote-btn { margin-left: 0; }
+  .row { align-items: center; }
+  .read-mark { font-size: 12px; }
+}
+.file-where { color: var(--accent); font-size: 11px; margin-left: 4px; }
+
+/* 原图开关：胶囊 + 状态圆点，开启时亮主色 */
+#btn-original { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 4px 12px; }
+#btn-original .orig-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-sub); opacity: .55; transition: all .15s; }
+#btn-original.active { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+#btn-original.active .orig-dot { background: #fff; opacity: 1; box-shadow: 0 0 0 3px rgba(255,255,255,.35); }
+
+/* "打开位置"按钮 */
+.loc-btn { color: var(--accent) !important; }

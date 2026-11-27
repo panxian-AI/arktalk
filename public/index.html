@@ -29,6 +29,8 @@
       <input id="search" type="text" placeholder="搜索">
       <button id="btn-add" title="添加" hidden>＋<span id="btn-add-badge" class="add-badge" hidden></span></button>
     </div>
+    <!-- 在线概览：把"谁在线"写成文字，不用再靠猜小圆点 -->
+    <div id="online-bar" hidden></div>
     <div id="list"></div>
   </aside>
   <main id="chat">
@@ -59,6 +61,7 @@
         <div id="toolbar">
           <button id="btn-at" title="提及群成员">@</button>
           <button id="btn-image" title="发图片">🖼️</button>
+          <button id="btn-original" title="发送原图（不压缩，超过 25MB 自动转压缩）"><span class="orig-dot"></span><span>原图</span></button>
           <button id="btn-file" title="发文件（对方点保存才开始传输）">📎</button>
           <button id="btn-voice" title="语音消息（点击开始/发送，Esc 取消）">🎤</button>
           <input id="image-input" type="file" accept="image/*" hidden>
@@ -75,6 +78,14 @@
   </main>
 </div>
 <div id="modal-backdrop" hidden><div id="modal"></div></div>
+<div id="lightbox" hidden>
+  <img id="lightbox-img" alt="">
+  <div id="lightbox-bar">
+    <button class="mini primary" id="lightbox-save">保存图片</button>
+    <button class="mini" id="lightbox-open" hidden>📁 打开位置</button>
+    <button class="mini" id="lightbox-close">关闭</button>
+  </div>
+</div>
 <script src="app.js"></script>
 </body>
 </html>
