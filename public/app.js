@@ -73,6 +73,15 @@ function handleFrame(m) {
 /** 对方设备在线状态 → 聊天头部的提示条。 */
 function updatePeerPill() {
   const pill = $('chat-upstream');
+  // 昵称旁的状态点：仅私聊联系人显示（群聊不显示）
+  const dot = $('chat-dot');
+  if (activeChat?.type === 'private' && Array.isArray(friends) && friends.some((f) => String(f.user_id) === String(activeChat.id))) {
+    dot.hidden = false;
+    dot.className = `on-dot ${peers[String(activeChat.id)] ? 'on' : 'off'}`;
+    dot.title = peers[String(activeChat.id)] ? '在线（P2P 直连）' : '离线（消息会排队）';
+  } else if (dot) {
+    dot.hidden = true;
+  }
   if (!activeChat || activeChat.type !== 'private') { pill.hidden = true; return; }
   const online = peers[String(activeChat.id)];
   pill.hidden = online !== false; // 只有明确离线才提示
