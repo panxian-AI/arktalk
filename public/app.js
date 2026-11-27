@@ -198,19 +198,49 @@ function renderList() {
       const c = chats.find((x) => x.chatKey === key);
       const name = f.remark || f.nickname || `账号 ${f.user_id}`;
       box.appendChild(itemEl(key, avatarOfUser(f.user_id, name), name,
-        c?.lastPreview ?? '', '', c?.unread ?? 0));
+        c?.lastPreview ?? '', '', c?.unread ?? 0, { delete: () => confirmRemoveFriend(f.user_id, name) }));
     }
     if (!friends.length) box.innerHTML = '<div class="list-empty">还没有联系人<br>点右上角 ＋ 添加</div>';
-  } else {
+  } else if (tab === 'groups') {
     for (const g of groups.filter((g) => match(g.group_name) || match(g.group_id))) {
       const key = `g${g.group_id}`;
       const c = chats.find((x) => x.chatKey === key);
       const name = g.group_name || `群 ${g.group_id}`;
       box.appendChild(itemEl(key, avatarOfGroup(g.group_id, name), name,
-        c?.lastPreview ?? '', '', c?.unread ?? 0));
+        c?.lastPreview ?? '', '', c?.unread ?? 0, { delete: () => confirmDissolveGroup(g.group_id, name) }));
     }
     if (!groups.length) box.innerHTML = '<div class="list-empty">还没有群聊<br>点右上角 ＋ 创建</div>';
   }
+}
+
+/** 删除联系人（确认后调 rpc；聊天记录仍保留在本机）。 */
+async function confirmRemoveFriend(userId, name) {
+  if (!window.confirm(`删除联系人「${name}」？\n删除后需重新添加才能继续聊天；聊天记录仍保留在本机。`)) return;
+  try {
+    await rpc('remove-friend', { userId });
+    friends = friends.filter((f) => String(f.user_id) !== String(userId));
+    if (activeChat?.key === `p${userId}`) exitChatToMobileList();
+    renderList();
+    $('send-hint').textContent = '已删除';
+  } catch (e) {
+    $('send-hint').textContent = `删除失败：${e.message}`;
+  }
+  setTimeout(() => { $('send-hint').textContent = ''; }, 3000);
+}
+
+/** 删除（解散）本地群。 */
+async function confirmDissolveGroup(groupId, name) {
+  if (!window.confirm(`删除群聊「${name}」？\n仅从本机移除该群；聊天记录仍保留在本机。`)) return;
+  try {
+    await rpc('remove-group', { groupId });
+    groups = groups.filter((g) => String(g.group_id) !== String(groupId));
+    if (activeChat?.key === `g${groupId}`) exitChatToMobileList();
+    renderList();
+    $('send-hint').textContent = '已删除';
+  } catch (e) {
+    $('send-hint').textContent = `删除失败：${e.message}`;
+  }
+  setTimeout(() => { $('send-hint').textContent = ''; }, 3000);
 }
 function metaOf(chatKey) {
   const isGroup = chatKey[0] === 'g';
@@ -224,14 +254,24 @@ function metaOf(chatKey) {
   const name = f?.remark || f?.nickname || (String(id) === String(selfInfo?.accountId) ? `${selfInfo?.nickname || '我'}（我）` : `账号 ${id}`);
   return { name, avatar: avatarOfUser(id, name) };
 }
-function itemEl(key, avatar, name, preview, time, unread) {
+function itemEl(key, avatar, name, preview, time, unread, opts = {}) {
   const div = document.createElement('div');
   div.className = 'item' + (activeChat?.key === key ? ' active' : '');
-  div.innerHTML = `<img class="avatar" src="${esc(avatar)}" onerror="this.style.visibility='hidden'">
+  // 联系人在线状态点（自检：打开时自动拨号 + 每 20s 心跳刷新，绿=可直连）
+  const uid = key.slice(1);
+  const isContact = key[0] === 'p' && Array.isArray(friends) && friends.some((f) => String(f.user_id) === uid);
+  const online = isContact
+    ? `<span class="on-dot ${peers?.[uid] ? 'on' : 'off'}" title="${peers?.[uid] ? 'P2P 直连在线' : '离线（消息会排队）'}"></span>`
+    : '';
+  div.innerHTML = `${online}<img class="avatar" src="${esc(avatar)}" onerror="this.style.visibility='hidden'">
     <div class="item-main"><div class="item-name">${esc(name)}</div><div class="item-preview">${esc(preview)}</div></div>
     ${time ? `<span class="item-time">${esc(time)}</span>` : ''}
-    ${unread > 0 ? `<span class="badge">${unread > 99 ? '99+' : unread}</span>` : ''}`;
+    ${unread > 0 ? `<span class="badge">${unread > 99 ? '99+' : unread}</span>` : ''}
+    ${opts.delete ? '<button class="item-del" title="删除">✕</button>' : ''}`;
   div.onclick = () => openChat(key);
+  if (opts.delete) {
+    div.querySelector('.item-del').onclick = (e) => { e.stopPropagation(); opts.delete(); };
+  }
   return div;
 }
 

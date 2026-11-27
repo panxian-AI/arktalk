@@ -235,3 +235,16 @@ body { font: 14px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; color: var(--te
   /* 弹窗类在手机上不要太小 */
   .modal, .dialog, [class*="modal"] { max-width: 92vw; }
 }
+
+/* 列表项删除按钮：桌面 hover 显示，触屏常显 */
+.item-del { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); border: 0; background: var(--hover); color: var(--text-sub); width: 26px; height: 26px; border-radius: 13px; font-size: 13px; line-height: 1; cursor: pointer; opacity: 0; transition: opacity .12s; }
+.item:hover .item-del { opacity: 1; }
+.item-del:hover { background: #fde3e3; color: #d33; }
+
+/* 联系人在线状态点（自检结果） */
+.item .on-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; margin-right: 4px; }
+.on-dot.on { background: #34c759; box-shadow: 0 0 0 2px rgba(52,199,89,.18); }
+.on-dot.off { background: #c1c6cd; }
+@media (max-width: 760px) {
+  .item-del { opacity: 1; width: 34px; height: 34px; font-size: 15px; }
+}

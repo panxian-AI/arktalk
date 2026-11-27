@@ -70,6 +70,10 @@ export class Bridge {
     for (const f of this.local.friends) {
       if (f.endpoint) this.link.setEndpoint(f.user_id, f.endpoint);
     }
+    // 心跳自检：每 20 秒把「哪些账号当前能直连」广播给界面（列表绿/灰点实时刷新）
+    this._peersTimer = setInterval(() => {
+      this._broadcast({ type: 'peers', peers: this.link.onlineMap() });
+    }, 20000);
 
     // P2P 事件 → 落本机 + 广播界面
     this.link.on('message', (m) => this._onPeerMessage(m));
@@ -115,6 +119,7 @@ export class Bridge {
   }
 
   stop() {
+    clearInterval(this._peersTimer);
     for (const ws of this.uiSockets) { try { ws.close(1001, 'server stop'); } catch { /* ignore */ } }
     this._wss?.close();
     this._server?.close();
@@ -222,6 +227,7 @@ export class Bridge {
       case 'add-friend': return this._addFriend(p);
       case 'remove-friend': return this._removeFriend(p);
       case 'create-group': return this._createGroup(p);
+      case 'remove-group': return this._removeGroup(p);
       case 'send-private': return await this._sendPrivate(p);
       case 'send-to-group': return await this._sendToGroup(p);
       case 'send-file': return await this._sendFile(p);
@@ -274,6 +280,16 @@ export class Bridge {
     this._saveLocal();
     this._broadcastHello();
     return { removed: before !== this.local.friends.length };
+  }
+
+  /** 删除本地群（仅本机移除；聊天记录保留）。 */
+  _removeGroup({ groupId } = {}) {
+    const gid = Number(groupId);
+    const before = this.local.groups.length;
+    this.local.groups = this.local.groups.filter((g) => Number(g.group_id) !== gid);
+    this._saveLocal();
+    this._broadcastHello();
+    return { removed: before !== this.local.groups.length };
   }
 
   /** 手动建群：本地群，发消息逐成员经 P2P 直发。 */
