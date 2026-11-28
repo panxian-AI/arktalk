@@ -1049,7 +1049,7 @@ function openProfileModal(pendingAvatar) {
       <div class="backup-msg" id="pf-backup-msg" hidden></div>
       <input type="file" id="pf-backup-file" accept=".zip,application/zip" hidden>
     </div>
-    <div class="modal-sub">软件更新（只有被标记为「正式稳定版」的版本才会提示）</div>
+    <div class="modal-sub">软件更新（正式稳定版自动提示；测试版需内测资格）</div>
     <div class="update-box" id="pf-update-box">
       <div class="update-line"><span id="pf-update-status">检查中…</span><button class="mini" id="pf-update-check">重新检查</button></div>
       <div class="update-notes" id="pf-update-notes" hidden></div>
@@ -1057,6 +1057,11 @@ function openProfileModal(pendingAvatar) {
         <button class="mini primary" id="pf-update-do">下载并安装</button>
         <button class="mini" id="pf-update-later">跳过此版</button>
       </div>
+      <div class="update-line beta-line" id="pf-beta-line">
+        <input id="pf-beta-code" class="beta-input" placeholder="内测资格代码（选填，20 位）" maxlength="32" autocomplete="off" spellcheck="false">
+        <button class="mini" id="pf-beta-unlock">解锁测试版</button>
+      </div>
+      <div class="update-notes" id="pf-beta-status" hidden></div>
       <div class="update-actions" id="pf-update-rollback-box" hidden>
         <button class="mini" id="pf-update-rollback">回退到上一个版本</button>
       </div>
@@ -1210,6 +1215,7 @@ function openProfileModal(pendingAvatar) {
     prepare: () => (window.arkDesktop?.isElectron ? window.arkDesktop.updatePrepare() : rpc('update-prepare')),
     apply: () => (window.arkDesktop?.isElectron ? window.arkDesktop.updateApply() : rpc('update-apply')),
     skip: (v) => (window.arkDesktop?.isElectron ? window.arkDesktop.updateSkip(v) : rpc('update-skip', { version: v })),
+    betaUnlock: (code) => (window.arkDesktop?.isElectron ? window.arkDesktop.betaUnlock(code) : Promise.resolve({ ok: false, error: '内测通道仅桌面版 / 手机版可用' })),
     rollback: () => (window.arkDesktop?.isElectron ? window.arkDesktop.updateRollback() : rpc('update-rollback'))
   };
   const renderUpdate = async () => {
@@ -1220,7 +1226,7 @@ function openProfileModal(pendingAvatar) {
       if (r.error) { st.textContent = `检查失败：${r.error}`; return; }
       if (r.dev) { st.textContent = '当前为开发模式（发行版才有自动更新）'; return; }
       if (r.available && !r.skipped) {
-        st.textContent = `✅ 有正式更新：${r.current} → ${r.latest}${r.published ? `（${r.published}）` : ''}${r.source ? ` · 线路 ${r.source}` : ''}`;
+        st.textContent = `${r.isBeta ? '🧪 有测试版' : '✅ 有正式更新'}：${r.current} → ${r.latest}${r.published ? `（${r.published}）` : ''}${r.source ? ` · 线路 ${r.source}` : ''}`;
         const notes = $('pf-update-notes');
         if (r.notes) { notes.textContent = r.notes; notes.hidden = false; }
         $('pf-update-actions').hidden = false;
@@ -1248,6 +1254,26 @@ function openProfileModal(pendingAvatar) {
         };
       } else {
         st.textContent = `✅ 已是最新正式版（${r.current || '?'}）`;
+      }
+      // 内测资格：解锁后隐藏输入框，显示通道状态；公告牌有测试版时提示版本号
+      const betaLine = $('pf-beta-line'), betaSt = $('pf-beta-status');
+      if (betaLine) {
+        if (r.betaUnlocked) {
+          betaLine.hidden = true;
+          betaSt.hidden = false;
+          betaSt.textContent = r.betaLatest
+            ? `🧪 内测通道已解锁，当前测试版：v${r.betaLatest}`
+            : '🧪 内测通道已解锁（公告牌暂无测试版）';
+        } else {
+          betaLine.hidden = false;
+          betaSt.hidden = true;
+          $('pf-beta-unlock').onclick = async () => {
+            const inp = $('pf-beta-code'), btn = $('pf-beta-unlock');
+            const res = await upd.betaUnlock(inp.value.trim());
+            if (res?.ok) { await renderUpdate(); }
+            else { betaSt.hidden = false; betaSt.textContent = `❌ ${res?.error || '解锁失败'}`; }
+          };
+        }
       }
       // 回退入口（PC 有备份 / 安卓有备份的 APK 时显示）
       const canRollback = window.arkNative

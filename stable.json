@@ -9,5 +9,7 @@
     "windows": "https://github.com/panxian-AI/arktalk/releases/download/v0.6.8/ArkTalk-0.6.8-win64.zip",
     "android": "https://github.com/panxian-AI/arktalk-android/releases/download/v0.6.8/arktalk-v0.6.8-release.apk"
   },
-  "_说明": "只有 stable=true 的版本才会被客户端检测为可更新。日常修复版照常发 Release，但不要改这个文件——只有用户明确说『这是正式版/稳定版』时才把 version/tag/assets 更新到这里并推送。"
+  "beta": null,
+  "betaCodeHash": "28abd4672798dd885ba42d6302381b8ddeebab440356630cd6776c7d802e4379",
+  "_说明": "只有 stable=true 的版本才会被客户端检测为可更新。日常修复版照常发 Release，但不要改这个文件——只有用户明确说『这是正式版/稳定版』时才把 version/tag/assets 更新到这里并推送。beta 区：发测试版时填入 {version,versionCode,tag,beta:true,published,notes,assets}，只有输入内测码（sha256=betaCodeHash）解锁的客户端才会检测并下载测试版；betaCodeHash 本身可以公开，内测码原文绝不提交。"
 }

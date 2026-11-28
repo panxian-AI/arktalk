@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('arkDesktop', {
   updatePrepare() { return ipcRenderer.invoke('ark:update-prepare'); },
   updateApply()   { return ipcRenderer.invoke('ark:update-apply'); },
   updateSkip(v)   { return ipcRenderer.invoke('ark:update-skip', v); },
+  betaUnlock(code){ return ipcRenderer.invoke('ark:update-beta-unlock', code); },
   updateRollback(){ return ipcRenderer.invoke('ark:update-rollback'); },
   // 存储位置（聊天记录 / 接收文件）
   storageChoose(title){ return ipcRenderer.invoke('ark:storage-choose', title); },

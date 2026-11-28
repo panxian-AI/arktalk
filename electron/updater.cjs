@@ -8,6 +8,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const crypto = require('node:crypto');
 const https = require('node:https');
 const http = require('node:http');
 const { spawn } = require('node:child_process');
@@ -234,22 +235,67 @@ class Updater {
 
   currentVersion() { return versionOf(path.join(__dirname, '..')); }
 
-  /** 检查更新：多线路并发测速拉公告牌，只有 stable=true 且版本号更高才返回 available。 */
+  /** 内测通道是否已解锁（解锁状态只存哈希，不存内测码原文）。 */
+  betaUnlocked() { return !!this.state.betaHash; }
+
+  /**
+   * 内测资格代码校验：sha256(输入) 与公告牌 betaCodeHash 比对。
+   * 通过则把哈希存进本地状态，开放测试版检测与下载；原文不留存、不提交。
+   */
+  async setBetaCode(code) {
+    const c = String(code || '').trim();
+    if (!c) return { ok: false, error: '请输入内测资格代码' };
+    const { buf } = await fetchFastest(STABLE_URLS.map((u) => `${u}?t=${Date.now()}`), { timeoutMs: 8000, hardMs: 9000 });
+    const info = JSON.parse(buf.toString('utf8').replace(/^\uFEFF/, ''));
+    const target = typeof info.betaCodeHash === 'string' ? info.betaCodeHash.toLowerCase() : '';
+    if (!target) return { ok: false, error: '公告牌尚未配置内测通道' };
+    const h = crypto.createHash('sha256').update(c, 'utf8').digest('hex');
+    if (h !== target) return { ok: false, error: '内测码不正确' };
+    this.state.betaHash = h;
+    this._saveState();
+    this.log('内测通道已解锁');
+    return { ok: true };
+  }
+
+  /**
+   * 检查更新：多线路并发测速拉公告牌。
+   * 正式版：stable=true 且版本更高才 available。
+   * 测试版：公告牌 beta 条目，仅在输入内测码解锁（且哈希仍与 betaCodeHash 一致）后开放；
+   *         同时有正式版与测试版可选时，取版本号更高的一条。
+   */
   async check() {
     const { buf, url } = await fetchFastest(STABLE_URLS.map((u) => `${u}?t=${Date.now()}`), { timeoutMs: 8000, hardMs: 9000 });
     const info = JSON.parse(buf.toString('utf8').replace(/^\uFEFF/, ''));
     const cur = this.currentVersion();
-    const available = !!info.stable && cmpVer(info.version, cur) > 0;
-    this.log(`公告牌来源：${short(url)}，版本 ${info.version}，当前 ${cur}`);
+    const beta = (info.beta && typeof info.beta === 'object' && !Array.isArray(info.beta)) ? info.beta : null;
+    const betaCodeHash = typeof info.betaCodeHash === 'string' ? info.betaCodeHash.toLowerCase() : '';
+    // 解锁有效性：本地存过哈希，且（公告牌没配哈希时保持解锁；配了则必须一致）
+    const unlocked = this.betaUnlocked() && (!betaCodeHash || this.state.betaHash === betaCodeHash);
+
+    let pick = null;
+    if (info.stable && cmpVer(info.version, cur) > 0) {
+      pick = { channel: 'stable', version: info.version, notes: info.notes ?? '', published: info.published ?? '', assetUrl: info.assets?.windows ?? '' };
+    }
+    if (unlocked && beta && beta.assets?.windows && cmpVer(beta.version, cur) > 0) {
+      if (!pick || cmpVer(beta.version, pick.version) > 0) {
+        pick = { channel: 'beta', version: beta.version, notes: beta.notes ?? '', published: beta.published ?? '', assetUrl: beta.assets.windows };
+      }
+    }
+    this.log(`公告牌来源：${short(url)}，正式版 ${info.version}${beta ? `，测试版 ${beta.version}` : ''}，当前 ${cur}${unlocked ? '，内测已解锁' : ''}`);
     return {
       current: cur,
-      latest: info.version ?? '',
-      available,
-      notes: info.notes ?? '',
-      published: info.published ?? '',
-      assetUrl: info.assets?.windows ?? '',
+      latest: pick?.version ?? info.version ?? '',
+      available: !!pick,
+      channel: pick?.channel ?? '',
+      isBeta: pick?.channel === 'beta',
+      notes: pick?.notes ?? '',
+      published: pick?.published ?? '',
+      assetUrl: pick?.assetUrl ?? '',
       source: short(url),
-      skipped: this.state.skipped === info.version
+      skipped: pick ? this.state.skipped === pick.version : false,
+      betaUnlocked: unlocked,
+      betaLatest: beta?.version ?? '',
+      betaPublished: beta?.published ?? ''
     };
   }
 

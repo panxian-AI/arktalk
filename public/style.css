@@ -388,6 +388,10 @@ body { font: 14px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; color: var(--te
 .update-notes { margin-top: 8px; padding: 8px 10px; background: var(--bg2, #f6f8fb); border-radius: 6px;
   font-size: 12px; color: var(--text-sub); line-height: 1.5; }
 .update-actions { display: flex; gap: 8px; margin-top: 10px; }
+.beta-line { margin-top: 10px; justify-content: flex-start; }
+.beta-input { flex: 1; min-width: 0; font-size: 12px; padding: 5px 8px; border: 1px solid var(--border, #e0e4ea);
+  border-radius: 6px; background: var(--bg, #fff); color: var(--text, #222); outline: none; }
+.beta-input:focus { border-color: var(--primary, #4a7dff); }
 
 /* ---------- 存储位置（电脑版） ---------- */
 .storage-box { border: 1px solid var(--border, #e0e4ea); border-radius: 8px; padding: 10px 12px; margin-top: 6px; }

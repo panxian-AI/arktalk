@@ -175,6 +175,12 @@ ipcMain.handle('ark:update-skip', async (_e, v) => {
   if (!updater) updater = new Updater(app, _updLog);
   updater.skip(v); return { ok: true };
 });
+// 内测资格代码：sha256 与公告牌 betaCodeHash 比对，通过后解锁测试版通道
+ipcMain.handle('ark:update-beta-unlock', async (_e, code) => {
+  if (!updater) updater = new Updater(app, _updLog);
+  try { return await updater.setBetaCode(String(code || '')); }
+  catch (e) { return { ok: false, error: String(e?.message || e) }; }
+});
 ipcMain.handle('ark:update-rollback', async () => {
   try {
     if (!app.isPackaged) throw new Error('开发模式不支持回退');
