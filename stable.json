@@ -1,13 +1,13 @@
 {
-  "version": "0.6.6",
-  "versionCode": 33,
-  "tag": "v0.6.6",
+  "version": "0.6.7",
+  "versionCode": 34,
+  "tag": "v0.6.7",
   "stable": true,
   "published": "2026-11-28",
-  "notes": "删除联系人时可连带删除本机聊天记录（全部/只删我发出的/只删收到的）；单条消息可删除（电脑左键、手机长按），仅删本机不影响对方",
+  "notes": "紧急修复：安卓端更新检查一直超时。多线路测速改用守护线程+应用层硬超时，镜像线路优先，DNS 卡死不再拖到超时；下载增加总时长兜底。",
   "assets": {
-    "windows": "https://github.com/panxian-AI/arktalk/releases/download/v0.6.6/ArkTalk-0.6.6-win64.zip",
-    "android": "https://github.com/panxian-AI/arktalk-android/releases/download/v0.6.6/arktalk-v0.6.6-release.apk"
+    "windows": "https://github.com/panxian-AI/arktalk/releases/download/v0.6.7/ArkTalk-0.6.7-win64.zip",
+    "android": "https://github.com/panxian-AI/arktalk-android/releases/download/v0.6.7/arktalk-v0.6.7-release.apk"
   },
   "_说明": "只有 stable=true 的版本才会被客户端检测为可更新。日常修复版照常发 Release，但不要改这个文件——只有用户明确说『这是正式版/稳定版』时才把 version/tag/assets 更新到这里并推送。"
 }
