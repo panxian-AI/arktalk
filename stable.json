@@ -9,7 +9,18 @@
     "windows": "https://github.com/panxian-AI/arktalk/releases/download/v0.7.0/ArkTalk-0.7.0-win64.zip",
     "android": "https://github.com/panxian-AI/arktalk-android/releases/download/v0.7.0/arktalk-v0.7.0-release.apk"
   },
-  "beta": null,
+  "beta": {
+    "version": "0.7.1",
+    "versionCode": 38,
+    "tag": "v0.7.1-beta.1",
+    "beta": true,
+    "published": "2026-11-28",
+    "notes": "测试版新功能：消息转发——消息旁「多选」按钮勾选消息后可逐条转发或合并转发给好友/本地群；合并转发为卡片消息，点击展开查看原始内容，支持嵌套；已保存文件转发后第三人仍可下载，未保存文件自动跳过并提示。上限 50 条/8MB。",
+    "assets": {
+      "windows": "https://github.com/panxian-AI/arktalk/releases/download/v0.7.1-beta.1/ArkTalk-0.7.1-win64.zip",
+      "android": "https://gh-proxy.com/https://github.com/panxian-AI/arktalk-android/releases/download/v0.7.1-beta.1/arktalk-v0.7.1-beta.1-release.apk"
+    }
+  },
   "betaCodeHash": "28abd4672798dd885ba42d6302381b8ddeebab440356630cd6776c7d802e4379",
   "_说明": "只有 stable=true 的版本才会被客户端检测为可更新。日常修复版照常发 Release，但不要改这个文件——只有用户明确说『这是正式版/稳定版』时才把 version/tag/assets 更新到这里并推送。beta 区：发测试版时填入 {version,versionCode,tag,beta:true,published,notes,assets}，只有输入内测码（sha256=betaCodeHash）解锁的客户端才会检测并下载测试版；betaCodeHash 本身可以公开，内测码原文绝不提交。"
 }
