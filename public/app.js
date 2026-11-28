@@ -1252,6 +1252,11 @@ function openProfileModal(pendingAvatar) {
           try { const p = await upd.prepare(); if (p?.ok === false) throw new Error(p.error); btn.textContent = '安装并重启…'; const a = await upd.apply(); if (a?.ok === false) throw new Error(a.error); }
           catch (e) { st.textContent = `更新失败：${e.message}`; btn.disabled = false; btn.textContent = '下载并安装'; }
         };
+      } else if (r.betaUnlocked && r.betaLatest) {
+        const ge = (a, b) => { const pa = String(a || '0').split('.').map(Number), pb = String(b).split('.').map(Number); for (let i = 0; i < Math.max(pa.length, pb.length); i++) { const x = pa[i] || 0, y = pb[i] || 0; if (x !== y) return x > y; } return true; };
+        st.textContent = ge(r.current, r.betaLatest)
+          ? `🧪 已是最新测试版（${r.current || '?'}）${r.latest && r.latest !== r.current ? `，正式版公告牌：${r.latest}` : ''}`
+          : `✅ 已是最新正式版（${r.current || '?'}）`;
       } else {
         st.textContent = `✅ 已是最新正式版（${r.current || '?'}）`;
       }
