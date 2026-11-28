@@ -113,4 +113,52 @@ export class LocalStore {
   findById(chatKey, messageId) {
     return this.read(chatKey, 1e9).find((m) => String(m.message_id) === String(messageId)) ?? null;
   }
+
+  /**
+   * 本机物理删除消息（仅删除本机记录，不影响对方设备）。
+   * @param {string} chatKey
+   * @param {object} [opts]
+   * @param {string} [opts.messageId] 只删这一条（优先）
+   * @param {boolean} [opts.sent]     删本机发出的（self_sent=true）
+   * @param {boolean} [opts.received] 删收到的（self_sent=false）
+   * @returns {{deleted:number}} 实际删除条数
+   */
+  deleteMessages(chatKey, opts = {}) {
+    const file = this._file(chatKey);
+    let text = '';
+    try { text = fs.readFileSync(file, 'utf8'); } catch { return { deleted: 0 }; }
+    const { messageId, sent, received } = opts;
+    const byId = messageId != null && String(messageId) !== '';
+    const kept = [];
+    let deleted = 0;
+    for (const s of text.split('\n')) {
+      if (!s.trim()) continue;
+      let rec;
+      try { rec = JSON.parse(s); } catch { kept.push(s); continue; } // 坏行保留不误删
+      let hit = false;
+      if (byId) {
+        hit = String(rec?.message_id) === String(messageId);
+      } else if (sent || received) {
+        const mine = rec?.self_sent === true;
+        hit = (mine && !!sent) || (!mine && !!received);
+      }
+      if (hit) { deleted++; continue; }
+      kept.push(s);
+    }
+    if (!deleted) return { deleted: 0 };
+    // 先关闭追加句柄：Windows 上有打开的 fd 时 rename 覆盖会 EPERM
+    this._closeFd(chatKey);
+    // 重写文件（写临时文件再原子替换，避免中途崩溃损坏）
+    const tmp = file + `.tmp-${process.pid}`;
+    fs.writeFileSync(tmp, kept.length ? kept.join('\n') + '\n' : '');
+    fs.renameSync(tmp, file);
+    // 同步去重集合：删除的消息 id 要从 _ids 移除，否则重新收到同 id 消息会被当成重复吞掉
+    const ids = new Set();
+    for (const s of kept) {
+      try { const j = JSON.parse(s); if (j?.message_id != null) ids.add(String(j.message_id)); } catch { /* 忽略坏行 */ }
+    }
+    this._ids.set(chatKey, ids);
+    this.log(`${chatKey} 本机删除 ${deleted} 条消息`, 'info');
+    return { deleted };
+  }
 }

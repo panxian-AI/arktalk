@@ -284,6 +284,15 @@ body { font: 14px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; color: var(--te
 
 /* 撤回按钮（红色小字，与引用按钮同款式） */
 .recall-btn { color: #d33 !important; }
+/* 删除单条消息按钮（深红，与撤回区分） */
+.del-msg-btn { color: #b00 !important; }
+
+/* 删除联系人弹窗：聊天记录处理方式单选项 */
+.del-choice { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 6px; }
+.del-choice label { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px;
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; }
+.del-choice label:has(input:checked) { border-color: var(--accent); background: var(--accent-weak); }
+.del-choice input { accent-color: var(--accent); }
 
 /* ---------- 图片：原图开关 / 灯箱 / 触屏适配 ---------- */
 #btn-original { font-size: 12px; }
@@ -393,8 +402,11 @@ body { font: 14px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; color: var(--te
   .msg-quote-btn { position: absolute !important; bottom: 2px; top: auto !important;
     left: auto; right: 0; opacity: 1 !important; margin: 0 !important;
     font-size: 11px; padding: 2px 9px; line-height: 1.5; }
+  /* 三个按钮依次错开：引用(0) / 删除(52) / 撤回(104) —— 避免重叠 */
+  .row .msg-quote-btn.del-msg-btn { right: 52px; }
   .row.mine .msg-quote-btn { left: 0; right: auto; }
-  .row.mine .msg-quote-btn.recall-btn { left: 52px; }
+  .row.mine .msg-quote-btn.del-msg-btn { left: 52px; right: auto; }
+  .row.mine .msg-quote-btn.recall-btn { left: 104px; right: auto; }
 
   /* 文件卡片：单列排版，长路径单独一行不挤按钮 */
   .file-card { display: grid; grid-template-columns: 1fr; gap: 6px; max-width: 100%; }

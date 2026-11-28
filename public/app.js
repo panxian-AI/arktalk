@@ -114,6 +114,14 @@ function handleFrame(m) {
     }
     case 'unread': chats.forEach((c) => { if (m.unread[c.chatKey] !== undefined) c.unread = m.unread[c.chatKey]; }); renderList(); break;
     case 'recalled': markRecalled(m.chatKey, m.messageId); break;
+    case 'message-deleted': {
+      const cache = chatCache.get(m.chatKey);
+      if (cache) {
+        cache.messages = cache.messages.filter((x) => String(x.message_id) !== String(m.messageId));
+        if (activeChat?.key === m.chatKey) renderMessages(cache.messages);
+      }
+      break;
+    }
     case 'file-progress': setFileStatus(m.fileId, m.size ? `接收中 ${Math.floor((m.received / m.size) * 100)}%` : `接收中 ${fmtSize(m.received)}`); break;
     case 'file-done': {
       const where = m.where || m.path || '';
@@ -301,19 +309,36 @@ function renderList() {
   }
 }
 
-/** 删除联系人（确认后调 rpc；聊天记录仍保留在本机）。 */
-async function confirmRemoveFriend(userId, name) {
-  if (!window.confirm(`删除联系人「${name}」？\n删除后需重新添加才能继续聊天；聊天记录仍保留在本机。`)) return;
-  try {
-    await rpc('remove-friend', { userId });
-    friends = friends.filter((f) => String(f.user_id) !== String(userId));
-    if (activeChat?.key === `p${userId}`) exitChatToMobileList();
-    renderList();
-    $('send-hint').textContent = '已删除';
-  } catch (e) {
-    $('send-hint').textContent = `删除失败：${e.message}`;
-  }
-  setTimeout(() => { $('send-hint').textContent = ''; }, 3000);
+/** 删除联系人：可选连带删除本机聊天记录（不影响对方设备）。 */
+function confirmRemoveFriend(userId, name) {
+  modalMode = 'remove-friend';
+  openModal(`
+    <div class="modal-title">删除联系人「${esc(name)}」</div>
+    <div class="modal-sub">聊天记录怎么处理？（只影响本机，不会删对方设备的记录）</div>
+    <div class="del-choice">
+      <label><input type="radio" name="del-scope" value="keep" checked> <span>保留聊天记录</span></label>
+      <label><input type="radio" name="del-scope" value="all"> <span>删除全部聊天记录</span></label>
+      <label><input type="radio" name="del-scope" value="sent"> <span>只删我发出的消息</span></label>
+      <label><input type="radio" name="del-scope" value="received"> <span>只删收到的消息</span></label>
+    </div>
+    <div class="modal-actions"><button class="ghost" id="rf-cancel">取消</button><button id="rf-ok">删除联系人</button></div>`);
+  $('rf-cancel').onclick = () => closeModal();
+  $('rf-ok').onclick = async () => {
+    const scope = document.querySelector('input[name="del-scope"]:checked')?.value ?? 'keep';
+    closeModal();
+    try {
+      const r = await rpc('remove-friend', { userId, chatDelete: scope });
+      friends = friends.filter((f) => String(f.user_id) !== String(userId));
+      chatCache.delete(`p${userId}`); // 清缓存，下次进入重新读，已删消息不再出现
+      if (activeChat?.key === `p${userId}`) exitChatToMobileList();
+      renderList();
+      $('send-hint').textContent = (r?.deletedMessages > 0)
+        ? `已删除联系人，清理 ${r.deletedMessages} 条本地记录` : '已删除';
+    } catch (e) {
+      $('send-hint').textContent = `删除失败：${e.message}`;
+    }
+    setTimeout(() => { $('send-hint').textContent = ''; }, 3200);
+  };
 }
 
 /** 删除（解散）本地群。 */
@@ -463,9 +488,29 @@ function messageEl(msg) {
       <div class="bubble ${msg.recalled ? 'recalled' : ''}">${msg.recalled ? '（已撤回）' : renderSegments(msg.message, mine)}</div>
       ${readMark}
     </div>
-    ${msg.recalled ? '' : recallBtn + '<button class="msg-quote-btn" title="引用这条消息">引用</button>'}`;
-  row.querySelector('.msg-quote-btn')?.addEventListener('click', () => setReply(msg));
+    ${msg.recalled ? '' : recallBtn + '<button class="msg-quote-btn" title="引用这条消息">引用</button>'}
+    <button class="msg-quote-btn del-msg-btn" title="删除这条消息（仅本机）">删除</button>`;
+  row.querySelector('.msg-quote-btn:not(.recall-btn):not(.del-msg-btn)')?.addEventListener('click', () => setReply(msg));
   row.querySelector('.recall-btn')?.addEventListener('click', () => recallMessage(msg));
+  row.querySelector('.del-msg-btn')?.addEventListener('click', (e) => { e.stopPropagation(); confirmDeleteMessage(msg); });
+  // 手机：长按气泡删除（与点击图片放大、文件卡片操作不冲突——只在 bubble-wrap 上长按）
+  const bubbleWrap = row.querySelector('.bubble-wrap');
+  if (bubbleWrap) {
+    let lpTimer = null, lpX = 0, lpY = 0;
+    bubbleWrap.addEventListener('touchstart', (e) => {
+      if (e.touches.length !== 1) return;
+      lpX = e.touches[0].clientX; lpY = e.touches[0].clientY;
+      lpTimer = setTimeout(() => { lpTimer = null; confirmDeleteMessage(msg); }, 600);
+    }, { passive: true });
+    bubbleWrap.addEventListener('touchmove', (e) => {
+      if (lpTimer && Math.hypot(e.touches[0].clientX - lpX, e.touches[0].clientY - lpY) > 10) {
+        clearTimeout(lpTimer); lpTimer = null;
+      }
+    }, { passive: true });
+    const cancel = () => { if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; } };
+    bubbleWrap.addEventListener('touchend', cancel);
+    bubbleWrap.addEventListener('touchcancel', cancel);
+  }
   return row;
 }
 
@@ -474,6 +519,20 @@ function recallMessage(msg) {
   if (!activeChat) return;
   rpc('recall-message', { chatKey: activeChat.key, messageId: msg.message_id })
     .catch((e) => { alert(`撤回失败：${e.message}`); });
+}
+
+/** 删除单条消息：仅本机物理删除，不影响对方；电脑点「删除」按钮、手机长按气泡都走这里。 */
+function confirmDeleteMessage(msg) {
+  if (!activeChat || !window.confirm('删除这条消息？\n只从本机删除，不影响对方设备。')) return;
+  rpc('delete-message', { chatKey: activeChat.key, messageId: msg.message_id })
+    .then(() => {
+      const cache = chatCache.get(activeChat.key);
+      if (cache) {
+        cache.messages = cache.messages.filter((x) => String(x.message_id) !== String(msg.message_id));
+        renderMessages(cache.messages);
+      }
+    })
+    .catch((e) => { alert(`删除失败：${e.message}`); });
 }
 
 /* ---------- 文件：发（📎 上传→发卡片）与收（点保存才拉取） ---------- */

@@ -316,6 +316,7 @@ export class Bridge {
       case 'send-to-group': return await this._sendToGroup(p);
       case 'send-file': return await this._sendFile(p);
       case 'recall-message': return this._recallMessage(p);
+      case 'delete-message': return this._deleteMessage(p);
       case 'save-image': return this._saveImage(p);
       case 'download-file': return this._downloadFile(p);
       case 'open-location': return this._openLocation(p);
@@ -679,7 +680,13 @@ export class Bridge {
     return { added: true, user_id: uid };
   }
 
-  _removeFriend({ userId } = {}) {
+  /**
+   * 删除联系人。
+   * @param {object} p
+   * @param {string} p.chatDelete 聊天记录处理方式：'keep'（默认，保留）| 'all' | 'sent' | 'received'
+   *   —— 全部为本机操作，不影响对方设备。
+   */
+  _removeFriend({ userId, chatDelete = 'keep' } = {}) {
     const uid = Number(userId);
     const before = this.local.friends.length;
     this.local.friends = this.local.friends.filter((x) => Number(x.user_id) !== uid);
@@ -687,10 +694,32 @@ export class Bridge {
     for (const g of this.local.groups) {
       g.members = (g.members ?? []).filter((m) => Number(m.user_id) !== uid);
     }
+    // 连带删除本机聊天记录（私聊 p<uid>）
+    let deletedMessages = 0;
+    if (chatDelete !== 'keep') {
+      const opt = chatDelete === 'all' ? { sent: true, received: true }
+        : chatDelete === 'sent' ? { sent: true }
+        : chatDelete === 'received' ? { received: true } : null;
+      if (opt) {
+        try { deletedMessages = this.store.deleteMessages(`p${uid}`, opt).deleted; }
+        catch (e) { this.log(`删聊天记录失败：${e.message}`, 'warn'); }
+      }
+    }
     this._saveLocal();
     this._broadcastHello();
     this._refreshRelay();
-    return { removed: before !== this.local.friends.length };
+    return { removed: before !== this.local.friends.length, deletedMessages };
+  }
+
+  /** 本机删除单条消息（与「撤回」不同：这是物理删除、不分是否已发出、仅删本机）。 */
+  _deleteMessage({ chatKey, messageId } = {}) {
+    const key = String(chatKey ?? '');
+    const mid = messageId != null ? String(messageId) : '';
+    if (!/^[pg][0-9]+$/.test(key)) throw new Error('非法会话');
+    if (!mid) throw new Error('缺少消息ID');
+    const r = this.store.deleteMessages(key, { messageId: mid });
+    if (r.deleted) this._broadcast({ type: 'message-deleted', chatKey: key, messageId: mid });
+    return r;
   }
 
   /** 删除本地群（仅本机移除；聊天记录保留）。 */
