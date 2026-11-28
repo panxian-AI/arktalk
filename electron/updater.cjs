@@ -63,6 +63,42 @@ function request(url, { timeoutMs = 8000, redirects = 0, registry = null, range 
 }
 
 /**
+ * 公告牌拉取：收齐所有成功线路后选内容最新的那份（不再"谁快用谁"）。
+ * 镜像缓存滞后会吐旧公告牌（实测 jsDelivr 滞后 10-60 分钟、ghproxy 5 分钟窗口）——
+ * 合并取优后，任何一条新线都能穿透旧缓存。
+ * 评分：主键 max(stable,beta) 的 versionCode，次键 stable 的 versionCode，beta 清空视为更新状态。
+ */
+function boardScore(info) {
+  const stableVc = Number(info?.versionCode) || 0;
+  const beta = (info?.beta && typeof info.beta === 'object' && !Array.isArray(info.beta)) ? info.beta : null;
+  const betaVc = beta ? (Number(beta.versionCode) || 0) : 0;
+  const top = Math.max(stableVc, betaVc);
+  return top * 1000000 + stableVc * 100 + (beta ? 0 : 1);
+}
+
+async function fetchBestBoard(urls, { timeoutMs = 8000, hardMs = 12000 } = {}) {
+  const safe = urls.map((u) =>
+    request(u, { timeoutMs, registry: null })
+      .then((buf) => {
+        const j = JSON.parse(buf.toString('utf8').replace(/^\uFEFF/, ''));
+        return j && j.version ? { info: j, url: u } : null;
+      })
+      .catch(() => null)
+  );
+  // 每条线自带 timeoutMs（8s）；hardMs 只是兜底。全出结果即返回，不等满硬超时。
+  const settled = await Promise.race([
+    Promise.all(safe),
+    new Promise((r) => setTimeout(() => r(null), hardMs)),
+  ]);
+  const list = settled ?? (await Promise.allSettled(safe)).map((x) => (x.status === 'fulfilled' ? x.value : null));
+  const boards = list.filter(Boolean);
+  if (!boards.length) throw new Error(`公告牌全部线路失败（${urls.length} 条）`);
+  let best = boards[0];
+  for (const b of boards) if (boardScore(b.info) > boardScore(best.info)) best = b;
+  return best;
+}
+
+/**
  * 多线路并发测速：所有线路同时发请求，谁先成功返回用谁（=最快线路）。
  * 应用层硬超时兜底：即使 DNS 解析阶段卡死，到点也会 reject，不会永远 pending。
  */
@@ -245,8 +281,7 @@ class Updater {
   async setBetaCode(code) {
     const c = String(code || '').trim();
     if (!c) return { ok: false, error: '请输入内测资格代码' };
-    const { buf } = await fetchFastest(STABLE_URLS.map((u) => `${u}?t=${Date.now()}`), { timeoutMs: 8000, hardMs: 9000 });
-    const info = JSON.parse(buf.toString('utf8').replace(/^\uFEFF/, ''));
+    const { info } = await fetchBestBoard(STABLE_URLS.map((u) => `${u}?t=${Date.now()}`));
     const target = typeof info.betaCodeHash === 'string' ? info.betaCodeHash.toLowerCase() : '';
     if (!target) return { ok: false, error: '公告牌尚未配置内测通道' };
     const h = crypto.createHash('sha256').update(c, 'utf8').digest('hex');
@@ -264,8 +299,7 @@ class Updater {
    *         同时有正式版与测试版可选时，取版本号更高的一条。
    */
   async check() {
-    const { buf, url } = await fetchFastest(STABLE_URLS.map((u) => `${u}?t=${Date.now()}`), { timeoutMs: 8000, hardMs: 9000 });
-    const info = JSON.parse(buf.toString('utf8').replace(/^\uFEFF/, ''));
+    const { info, url } = await fetchBestBoard(STABLE_URLS.map((u) => `${u}?t=${Date.now()}`));
     const cur = this.currentVersion();
     const beta = (info.beta && typeof info.beta === 'object' && !Array.isArray(info.beta)) ? info.beta : null;
     const betaCodeHash = typeof info.betaCodeHash === 'string' ? info.betaCodeHash.toLowerCase() : '';
