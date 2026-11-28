@@ -87,7 +87,12 @@ export class Bridge {
     this.readMarks = this._loadReadMarks();
     this.recalled = this._loadRecalled();
     this.downloadsDone = this._loadDownloadsDone();
-    this.link = new PeerLink({ selfId: this.local.profile.accountId, listen: p2p, log });
+    this.link = new PeerLink({
+      selfId: this.local.profile.accountId,
+      listen: p2p,
+      log,
+      historyPath: path.join(this.store.dataDir, 'endpoint-history.json')  // 地址学习：持久化地址池
+    });
     // 跨网穿透（OpenP2P，可选）：联系人里每个账号建一条 127.0.0.1:131xx → 对方 3021 的隧道
     this.openp2p = new OpenP2PManager({
       exePath: path.join(__dirname, '..', 'bin', 'openp2p.exe'),
@@ -625,6 +630,7 @@ export class Bridge {
       lanAddrs: lan,
       peers: this.link.onlineMap(),
       links: typeof this.link.linkStats === 'function' ? this.link.linkStats() : null,
+      addrHistory: typeof this.link.addrHistory === 'function' ? this.link.addrHistory() : null,
       friends: (this.local.friends || []).map((f) => ({
         id: f.user_id, nickname: f.nickname || '', endpoint: f.endpoint || ''
       })),

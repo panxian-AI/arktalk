@@ -9,7 +9,18 @@
     "windows": "https://github.com/panxian-AI/arktalk/releases/download/v0.6.9/ArkTalk-0.6.9-win64.zip",
     "android": "https://github.com/panxian-AI/arktalk-android/releases/download/v0.6.9/arktalk-v0.6.9-release.apk"
   },
-  "beta": null,
+  "beta": {
+    "version": "0.7.0",
+    "versionCode": 37,
+    "tag": "v0.7.0-beta.1",
+    "beta": true,
+    "published": "2026-11-28",
+    "notes": "测试版新功能：地址学习——自动记录并持久化与好友连通成功的地址，换网/重启后优先重试历史成功地址，恢复在线更快；失败地址指数退避冷却，不再反复撞死地址；诊断包新增地址池展示。",
+    "assets": {
+      "windows": "https://github.com/panxian-AI/arktalk/releases/download/v0.7.0-beta.1/ArkTalk-0.7.0-win64.zip",
+      "android": "https://github.com/panxian-AI/arktalk-android/releases/download/v0.7.0-beta.1/arktalk-v0.7.0-beta.1-release.apk"
+    }
+  },
   "betaCodeHash": "28abd4672798dd885ba42d6302381b8ddeebab440356630cd6776c7d802e4379",
   "_说明": "只有 stable=true 的版本才会被客户端检测为可更新。日常修复版照常发 Release，但不要改这个文件——只有用户明确说『这是正式版/稳定版』时才把 version/tag/assets 更新到这里并推送。beta 区：发测试版时填入 {version,versionCode,tag,beta:true,published,notes,assets}，只有输入内测码（sha256=betaCodeHash）解锁的客户端才会检测并下载测试版；betaCodeHash 本身可以公开，内测码原文绝不提交。"
 }

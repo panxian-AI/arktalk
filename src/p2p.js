@@ -16,6 +16,8 @@
 //
 // 可靠性：发出后未收到 ack 的消息进入离线发件箱，对端可达后自动补发。
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
 
 const PROTO = 1;
@@ -40,6 +42,16 @@ const PING_EVERY = 12000;  // 每 12s 探一次（ws 层 ping，对方 ws 栈自
 const DEAD_MS = 40000;     // 超过 40s 没收到任何帧/ pong → 判定半开，直接 terminate 触发重连
 const STALE_MS = 20000;    // 仲裁用：超过 20s 没动静的旧连接不再享有"优先保留"特权
 
+// ---------- 地址学习（持久化地址池） ----------
+// 内存里的 _score 健康度重启就丢：换网/重启后旧地址与认知清零，全部重新试错。
+// 把"成功联通过的地址"持久化下来，启动时恢复统计并把历史地址重新并入候选，
+// 对方换 WiFi / 拿到新 DHCP 地址后，重连时直接按历史成功率优先拨，恢复更快。
+const HIST_MAX_PER_ID = 8;   // 每个联系人最多记 8 条历史地址
+const HIST_SAVE_DELAY = 3000;// 打分变化后的节流落盘延迟（ms）
+
+/** 本机隧道地址（127.x / ::1）不进历史池——它们是本机动态分配的端口转发，由穿透机制每轮注入。 */
+const _isLoopbackEp = (ep) => /^(127\.|::1|\[::1\]|localhost:)/.test(String(ep));
+
 export class PeerLink {
   /**
    * @param {object} opts
@@ -52,10 +64,11 @@ export class PeerLink {
    *   'message'      ({ from, to, time, segs, id })
    *   'profile'      ({ accountId, nickname, avatar })
    */
-  constructor({ selfId, listen, log = () => {} }) {
+  constructor({ selfId, listen, log = () => {}, historyPath = '' }) {
     this.selfId = String(selfId);
     this.listen = listen;
     this.log = log;
+    this.historyPath = String(historyPath || '');  // 地址学习持久化文件（dataDir/endpoint-history.json）
     this.peers = new Map();      // accountId -> ws（当前在线的直连）
     this.outbox = new Map();     // accountId -> [envelope]（未 ack 的排队消息）
     this.endpoints = new Map();  // accountId -> ['host:port', ...]（要主动连的对端地址，可多个轮换）
@@ -69,11 +82,13 @@ export class PeerLink {
     this._offTimer = new Map();  // accountId -> 掉线滞后 timer
     this._fail = new Map();      // accountId -> 连续失败轮数（重试退避用）
     this._seen = new Map();      // accountId -> Set(msgId)（重发导致的重复消息过滤）
+    this._histTimer = null;      // 地址学习节流落盘 timer
     this._server = null;
     this._listeners = new Map();
     this._stopped = false;
     this._sweep = null;          // 周期补拨定时器
     this._ping = null;           // 保活探测定时器
+    this._loadHistory();
   }
 
   on(ev, fn) { (this._listeners.get(ev) ?? this._listeners.set(ev, new Set()).get(ev)).add(fn); return this; }
@@ -120,10 +135,12 @@ export class PeerLink {
   stop() {
     this._stopped = true;
     clearInterval(this._sweep); clearInterval(this._ping);
+    if (this._histTimer) { clearTimeout(this._histTimer); this._histTimer = null; }
     for (const t of this._retry.values()) clearTimeout(t);
     this._retry.clear();
     for (const ws of new Set([...this.peers.values(), ...this._out.values()])) { try { ws.close(1001, 'bye'); } catch { /* ignore */ } }
     this.peers.clear(); this._out.clear();
+    this._persistHistory();   // 退出前把地址学习成果落盘
     return new Promise((r) => this._server?.close(() => r()));
   }
 
@@ -166,6 +183,19 @@ export class PeerLink {
     for (const [id, ws] of this.peers) m[id] = ws.readyState === 1;
     for (const id of this._offTimer.keys()) if (!(id in m)) m[id] = true;
     return m;
+  }
+
+  /** 诊断：地址学习池——每联系人成功过的历史地址（按最近成功时间降序）。 */
+  addrHistory() {
+    const out = {};
+    for (const [id, m] of this._score) {
+      const eps = [...m.entries()]
+        .filter(([, s]) => s.ok > 0)
+        .sort((a, b) => b[1].lastOk - a[1].lastOk)
+        .map(([ep, s]) => ({ ep, ok: s.ok, rtt: s.rtt }));
+      if (eps.length) out[id] = eps;
+    }
+    return out;
   }
 
   /** 诊断：每个账号的候选地址、健康度与在线状态（排查"绿灰交替"用）。 */
@@ -442,6 +472,66 @@ export class PeerLink {
   }
 
   // ---------- 地址健康度（借鉴 ICE 的 candidate pair / libp2p 的地址排序） ----------
+
+  // ---- 地址学习：持久化地址池 ----
+
+  /** 启动时恢复历史地址：统计回填 _score，成功过的地址重新并入候选列表。 */
+  _loadHistory() {
+    if (!this.historyPath) return;
+    try {
+      const raw = JSON.parse(fs.readFileSync(this.historyPath, 'utf8'));
+      const links = raw?.links ?? {};
+      let restored = 0;
+      for (const [id, entries] of Object.entries(links)) {
+        if (!Array.isArray(entries)) continue;
+        for (const e of entries) {
+          if (!e?.ep || _isLoopbackEp(e.ep)) continue;
+          const s = this._candOf(id, e.ep);
+          if ((e.ok | 0) > 0) {           // 只恢复成功过的（失败统计重启清零，给死地址翻身机会）
+            s.ok = Math.max(1, e.ok | 0);
+            s.rtt = Math.max(1, e.rtt | 0);
+            s.lastOk = e.lastOk | 0;
+            restored += 1;
+          }
+          // 历史地址并入候选（追加在已有候选之后：联系人配置的地址与隧道优先）
+          const cur = this.endpoints.get(id) ?? [];
+          if (!cur.includes(e.ep)) { cur.push(e.ep); this.endpoints.set(id, cur); }
+        }
+      }
+      if (restored) this.log(`地址学习：恢复 ${restored} 条历史地址统计`);
+    } catch (e) {
+      if (e.code !== 'ENOENT') this.log(`地址学习：读取历史失败（${e.message}），忽略`, 'warn');
+    }
+  }
+
+  /** 打分变化后节流落盘（3 秒合并写一次，避免高频拨号把磁盘写爆）。 */
+  _persistSoon() {
+    if (!this.historyPath || this._histTimer || this._stopped) return;
+    this._histTimer = setTimeout(() => { this._histTimer = null; this._persistHistory(); }, HIST_SAVE_DELAY);
+  }
+
+  /** 把成功过的地址统计写入磁盘（原子写：tmp + rename）。 */
+  _persistHistory() {
+    if (!this.historyPath) return;
+    try {
+      const links = {};
+      for (const [id, m] of this._score) {
+        const entries = [...m.entries()]
+          .filter(([ep, s]) => s.ok > 0 && !_isLoopbackEp(ep))
+          .sort((a, b) => (b[1].lastOk || 0) - (a[1].lastOk || 0))
+          .slice(0, HIST_MAX_PER_ID)
+          .map(([ep, s]) => ({ ep, ok: s.ok, fail: 0, rtt: s.rtt, lastOk: s.lastOk }));
+        if (entries.length) links[id] = entries;
+      }
+      fs.mkdirSync(path.dirname(this.historyPath), { recursive: true });
+      const tmp = `${this.historyPath}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify({ v: 1, savedAt: Date.now(), links }, null, 1));
+      fs.renameSync(tmp, this.historyPath);
+    } catch (e) {
+      this.log(`地址学习：落盘失败（${e.message}）`, 'warn');
+    }
+  }
+
   _candOf(id, ep) {
     let m = this._score.get(id);
     if (!m) this._score.set(id, m = new Map());
@@ -460,6 +550,7 @@ export class PeerLink {
   _scoreOk(id, ep, rtt) {
     const s = this._candOf(id, ep);
     s.ok += 1; s.fail = 0; s.cool = 0; s.rtt = Math.max(1, rtt | 0); s.lastOk = Date.now();
+    this._persistSoon();
   }
 
   /** 候选排序：未冷却 → 成功率高的 → 延迟低的；冷却中的按最早解冻时间排在后面。 */
