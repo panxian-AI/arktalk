@@ -1215,7 +1215,7 @@ function openProfileModal(pendingAvatar) {
     prepare: () => (window.arkDesktop?.isElectron ? window.arkDesktop.updatePrepare() : rpc('update-prepare')),
     apply: () => (window.arkDesktop?.isElectron ? window.arkDesktop.updateApply() : rpc('update-apply')),
     skip: (v) => (window.arkDesktop?.isElectron ? window.arkDesktop.updateSkip(v) : rpc('update-skip', { version: v })),
-    betaUnlock: (code) => (window.arkDesktop?.isElectron ? window.arkDesktop.betaUnlock(code) : Promise.resolve({ ok: false, error: '内测通道仅桌面版 / 手机版可用' })),
+    betaUnlock: (code) => (window.arkDesktop?.isElectron ? window.arkDesktop.betaUnlock(code) : rpc('update-beta-unlock', { code })),
     rollback: () => (window.arkDesktop?.isElectron ? window.arkDesktop.updateRollback() : rpc('update-rollback'))
   };
   const renderUpdate = async () => {
