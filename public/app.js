@@ -144,10 +144,17 @@ function handleFrame(m) {
     case 'file-done': {
       const where = m.where || m.path || '';
       setFileDone(m.fileId, where, m.path);
+      const w = refMediaWaiters.get(String(m.fileId));
+      if (w) { refMediaWaiters.delete(String(m.fileId)); w(true); }
       break;
     }
     case 'file-ack': setFileStatus(m.fileId, '对方已接收 ✓'); break;
-    case 'file-error': setFileStatus(m.fileId, `失败：${m.error ?? '传输中止'}`); break;
+    case 'file-error': {
+      setFileStatus(m.fileId, `失败：${m.error ?? '传输中止'}`);
+      const w = refMediaWaiters.get(String(m.fileId));
+      if (w) { refMediaWaiters.delete(String(m.fileId)); w(false); }
+      break;
+    }
     case 'send-hint': $('send-hint').textContent = m.text ?? ''; if (m.text) setTimeout(() => { $('send-hint').textContent = ''; }, 6000); break;
   }
 }
@@ -503,6 +510,7 @@ function renderMessages(list) {
     box.appendChild(messageEl(msg));
   }
   if (!list.length) box.innerHTML = '<div class="list-empty" style="margin:auto">还没有消息</div>';
+  activateRefMedia(box);
   scrollBottom();
 }
 const dayOf = (t) => new Date((t ?? 0) * 1000).toLocaleDateString('zh-CN');
@@ -715,6 +723,7 @@ function openFwdViewer(items) {
   document.body.appendChild(ov);
   ov.querySelector('.fwd-close').addEventListener('click', () => ov.remove());
   ov.addEventListener('click', (e) => { if (e.target === ov) ov.remove(); });
+  activateRefMedia(ov);
 }
 
 /* ---------- 文件：发（📎 上传→发卡片）与收（点保存才拉取） ---------- */
@@ -739,6 +748,60 @@ function setFileDone(fid, where, fullPath) {
     }
   });
 }
+
+/* ---------- 引用媒体（转发降载）：自动向转发者拉取 ---------- */
+const refMediaJobs = new Map(); // fid -> Promise<src|null>（同一 fid 多处出现只拉一次）
+
+function ensureRefMedia(fid, meta) {
+  if (refMediaJobs.has(fid)) return refMediaJobs.get(fid);
+  const fileUrl = `/api/file/${encodeURIComponent(fid)}?token=${encodeURIComponent(uiCfg?.uiToken ?? '')}`;
+  const p = (async () => {
+    // 本机已有（自己转发的 / 已下载过的）→ 直接本地出
+    try {
+      const st = await rpc('file-state', { fileId: fid });
+      if (st?.local) return fileUrl;
+    } catch { /* ignore */ }
+    // 向转发者（当前聊天对象）拉取，复用文件下载通道
+    const uid = Number(activeChat?.id);
+    if (!uid) return null;
+    try {
+      const st2 = await rpc('download-file', { userId: uid, fileId: fid, name: meta.name || '媒体', size: Number(meta.size) || 0 });
+      if (st2?.already) return fileUrl; // 已下过（此时 file-state 应为 local，这里兜底）
+      // 等内核的 file-done / file-error 广播
+      return await new Promise((resolve) => {
+        refMediaWaiters.set(fid, (ok) => resolve(ok ? fileUrl : null));
+      });
+    } catch { return null; }
+  })();
+  refMediaJobs.set(fid, p);
+  return p;
+}
+const refMediaWaiters = new Map(); // fid -> resolve(ok)（file-done / file-error 事件回调）
+
+async function activateRefMedia(container) {
+  if (!container) return;
+  for (const el of container.querySelectorAll('[data-refmedia]')) {
+    if (el.dataset.refDone) continue;
+    el.dataset.refDone = '1';
+    const fid = el.dataset.refmedia;
+    const meta = { name: el.dataset.mname, size: el.dataset.msize };
+    const src = await ensureRefMedia(fid, meta);
+    if (src) {
+      el.src = src;
+      if (el.tagName === 'AUDIO') el.preload = 'metadata';
+    } else if (el.tagName === 'IMG') {
+      el.alt = '媒体获取失败（转发者可能不在线）';
+      el.classList.add('ref-fail');
+    } else {
+      const tip = document.createElement('span');
+      tip.style.cssText = 'color:var(--text-sub);font-size:12px';
+      tip.textContent = '媒体获取失败（转发者可能不在线）';
+      el.after(tip);
+      el.remove();
+    }
+  }
+}
+
 function uploadFile(file, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
@@ -839,19 +902,36 @@ function renderSegments(segs, mine = false) {
         let src = d.url ?? '';
         if (!src && d.file && String(d.file).startsWith('base64://')) src = `data:image/png;base64,${String(d.file).slice('base64://'.length)}`;
         if (!src) src = d.file ?? '';
+        if (!src && d.file_id) {
+          // 引用图片（转发降载）：先占位，activateRefImages 里自动向转发者拉取
+          html += `<img class="image-seg ref-media" data-refmedia="${esc(String(d.file_id))}" data-mkind="image" data-mname="${esc(d.name ?? '图片')}" data-msize="${esc(d.size ?? 0)}" alt="图片加载中…" title="点击放大 / 拖到桌面保存">`;
+          break;
+        }
         html += `<img class="image-seg" src="${esc(src)}" data-dname="${esc(d.name ?? '')}" loading="lazy" draggable="true" title="点击放大 / 拖到桌面保存">`;
         break;
       }
       case 'reply': html += `<div class="reply-quote">回复 ${esc(d.sender_name ?? '')}：${esc(d.text ?? '')}</div>`; break;
       case 'record': {
-        const src = d.url ?? (d.file && String(d.file).startsWith('base64://') ? `data:audio/webm;base64,${String(d.file).slice('base64://'.length)}` : d.file);
+        let src = d.url ?? (d.file && String(d.file).startsWith('base64://') ? `data:audio/webm;base64,${String(d.file).slice('base64://'.length)}` : d.file);
         const dur = Number(d.duration) || 0;
+        if (!src && d.file_id) {
+          // 引用语音（转发降载）：自动向转发者拉取
+          html += `<div class="voice-card"><span class="voice-icon">🎤</span><span class="voice-label">${dur ? `${dur}″` : '语音'}</span><audio controls preload="none" class="ref-media" data-refmedia="${esc(String(d.file_id))}" data-mkind="audio" data-mname="${esc(d.name ?? '语音')}" data-msize="${esc(d.size ?? 0)}"></audio></div>`;
+          break;
+        }
         html += src
           ? `<div class="voice-card"><span class="voice-icon">🎤</span><span class="voice-label">${dur ? `${dur}″` : '语音'}</span><audio controls preload="metadata" src="${esc(src)}"></audio></div>`
           : '<span style="color:var(--text-sub)">[语音]</span>';
         break;
       }
-      case 'video': html += d.url ? `<video controls src="${esc(d.url)}" style="max-width:220px;border-radius:6px"></video>` : '<span style="color:var(--text-sub)">[视频]</span>'; break;
+      case 'video': {
+        if (!d.url && d.file_id) {
+          html += `<video controls preload="none" class="ref-media" data-refmedia="${esc(String(d.file_id))}" data-mkind="video" data-mname="${esc(d.name ?? '视频')}" data-msize="${esc(d.size ?? 0)}" style="max-width:220px;border-radius:6px"></video>`;
+          break;
+        }
+        html += d.url ? `<video controls src="${esc(d.url)}" style="max-width:220px;border-radius:6px"></video>` : '<span style="color:var(--text-sub)">[视频]</span>';
+        break;
+      }
       case 'file': {
         const fid = String(d.file_id ?? '');
         const nm = String(d.name ?? '文件');

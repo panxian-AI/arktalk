@@ -483,3 +483,13 @@ body { font: 14px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; color: var(--te
 .pick-row img { width: 34px; height: 34px; border-radius: 50%; }
 .pick-name { flex: 1; font-size: 13px; }
 .pick-tag { color: var(--text-sub); font-size: 11px; }
+
+/* 合并转发浮层内的媒体约束：图片/视频不得按原尺寸撑爆弹窗 */
+.fwd-item-body img.image-seg,
+.fwd-item-body video,
+.fwd-item-body audio { max-width: 200px; max-height: 150px; border-radius: 6px; display: block; margin: 4px 0 0; }
+.fwd-item-body .card-seg, .fwd-item-body .file-seg { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+
+/* 引用媒体占位（转发降载）：未加载出的图片显示占位框 */
+img.ref-media:not([src]) { min-width: 120px; min-height: 80px; background: var(--accent-weak); border: 1px dashed var(--border); display: flex; align-items: center; justify-content: center; color: var(--text-sub); font-size: 12px; }
+img.ref-media.ref-fail { border-color: #c0392b; }

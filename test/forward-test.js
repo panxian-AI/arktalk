@@ -82,11 +82,35 @@ test('转发：合并模式发到群（单条 forward seg）；逐条模式发�
   assert.equal(b.groupSent[3].message[0].data.text, '三');
 });
 
-test('转发：空 items 与超限条数（>50 截断）', async () => {
+test('转发：空 items 与超限条数（>200 截断）', async () => {
   const b = makeBridge();
   await assert.rejects(() => b._forwardMessages({ userId: 1, mode: 'one', items: [] }), /没有可转发/);
-  const many = Array.from({ length: 60 }, (_, i) => ({ sender_name: 'x', time: i, segs: [{ type: 'text', data: { text: String(i) } }] }));
+  const many = Array.from({ length: 230 }, (_, i) => ({ sender_name: 'x', time: i, segs: [{ type: 'text', data: { text: String(i) } }] }));
   const r = await b._forwardMessages({ userId: 1, mode: 'merged', items: many });
   assert.equal(r.sent, 1);
-  assert.equal(b.sent[0].segs[0].data.items.length, 50, '超过 50 条应截断');
+  assert.equal(b.sent[0].segs[0].data.items.length, 200, '超过 200 条应截断');
+});
+
+test('转发：内嵌 base64 图片 → 文件引用（落盘+注册 outFiles，不再内嵌）', async () => {
+  const b = makeBridge();
+  // 1KB 的假 png（base64）
+  const png = Buffer.alloc(1024, 7).toString('base64');
+  const items = [{ sender_name: '阿明', time: 1, segs: [
+    { type: 'text', data: { text: '看图' } },
+    { type: 'image', data: { url: `data:image/png;base64,${png}` } },
+  ] }];
+  const r = await b._forwardMessages({ userId: 333, mode: 'merged', items });
+  assert.equal(r.sent, 1);
+  const imgSeg = b.sent[0].segs[0].data.items[0].segs[1];
+  assert.equal(imgSeg.type, 'image');
+  assert.ok(imgSeg.data.file_id, '应转成 file_id 引用');
+  assert.equal(imgSeg.data.ref, 1);
+  assert.equal(imgSeg.data.url, undefined, '不应再内嵌 dataURL');
+  assert.equal(imgSeg.data.size, 1024);
+  const local = path.join(b.filesDir, imgSeg.data.file_id);
+  assert.ok(fs.existsSync(local), '内容应落盘 filesDir');
+  assert.equal(fs.statSync(local).size, 1024);
+  assert.ok(b.outFiles.has(imgSeg.data.file_id), '应注册 outFiles 供接收方拉取');
+  // 转发内容体积应远小于内嵌体积（引用化生效）
+  assert.ok(JSON.stringify(b.sent[0].segs).length < 2048, '合并 payload 不应包含 base64');
 });

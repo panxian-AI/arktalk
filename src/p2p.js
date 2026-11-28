@@ -96,7 +96,7 @@ export class PeerLink {
 
   start() {
     this._stopped = false;
-    this._server = new WebSocketServer({ host: this.listen.host, port: this.listen.port });
+    this._server = new WebSocketServer({ host: this.listen.host, port: this.listen.port, maxPayload: 256 * 1024 * 1024 });
     // 周期自愈：每 10s 扫一遍已知地址，没连上的自动补拨——对方后上线也能自动恢复在线
     this._sweep = setInterval(() => {
       if (this._stopped) return;
@@ -603,7 +603,7 @@ export class PeerLink {
     const id = race.id;
     let ws;
     try {
-      ws = new WebSocket(`ws://${ep}`, { handshakeTimeout: HANDSHAKE_MS });
+      ws = new WebSocket(`ws://${ep}`, { handshakeTimeout: HANDSHAKE_MS, maxPayload: 256 * 1024 * 1024 });
     } catch (e) {
       this._scoreFail(id, ep);
       return;

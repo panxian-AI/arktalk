@@ -18,6 +18,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+
+/** dataURL MIME → 文件扩展名（内嵌媒体落盘用） */
+const MIME_EXT = new Map([
+  ['image/png', '.png'], ['image/jpeg', '.jpg'], ['image/gif', '.gif'], ['image/webp', '.webp'], ['image/bmp', '.bmp'],
+  ['audio/webm', '.webm'], ['audio/mp4', '.m4a'], ['audio/ogg', '.ogg'], ['audio/mpeg', '.mp3'], ['audio/wav', '.wav'], ['audio/aac', '.aac'],
+  ['video/mp4', '.mp4'], ['video/webm', '.webm'],
+]);
 import { buildZip, parseZip, jsonFrom, makeManifest, checkManifest, BACKUP_FORMAT, SCHEMA } from './backup.js';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
@@ -238,6 +245,22 @@ export class Bridge {
       this._onUpload(req, res, url).catch(() => { try { res.writeHead(500); res.end('upload failed'); } catch { /* ignore */ } });
       return;
     }
+    // 引用媒体服务：转发出去的图片/语音/视频（file_id 引用）与本机已下载文件都从这里出
+    if (url.pathname.startsWith('/api/file/')) {
+      if (url.searchParams.get('token') !== this.uiToken) { res.writeHead(403); res.end(); return; }
+      const local = this._localFileFor(decodeURIComponent(url.pathname.slice('/api/file/'.length)));
+      if (!local) { res.writeHead(404); res.end('not found'); return; }
+      const mime = {
+        '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
+        '.webm': 'audio/webm', '.m4a': 'audio/mp4', '.ogg': 'audio/ogg', '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.aac': 'audio/aac', '.mp4': 'video/mp4',
+      }[path.extname(local).toLowerCase()] ?? 'application/octet-stream';
+      try {
+        const body = fs.readFileSync(local);
+        res.writeHead(200, { 'content-type': mime, 'cache-control': 'private, max-age=3600' });
+        res.end(body);
+      } catch { res.writeHead(404); res.end('not found'); }
+      return;
+    }
     let p = url.pathname === '/' ? '/index.html' : url.pathname;
     p = path.normalize(p).replace(/^([/\\])+/, '');
     const file = path.join(__dirname, '..', 'public', p);
@@ -325,6 +348,7 @@ export class Bridge {
       case 'send-private': return await this._sendPrivate(p);
       case 'send-to-group': return await this._sendToGroup(p);
       case 'forward-messages': return await this._forwardMessages(p);
+      case 'file-state': { const fid = String(p.fileId ?? '').trim(); return { local: !!this._localFileFor(fid) }; }
       case 'send-file': return await this._sendFile(p);
       case 'recall-message': return this._recallMessage(p);
       case 'delete-message': return this._deleteMessage(p);
@@ -1180,36 +1204,107 @@ export class Bridge {
    * 文件归属：file seg 的内容由 filesDir/<fid> 服务——自己发过的直接可用；接收的文件若已保存，
    * 转发前复制进 filesDir 并注册 outFiles（第三人下载时向转发者拉取）。未保存的文件跳过并回报。
    */
+  /**
+   * 内嵌 base64（图片/语音/视频的 dataURL 或 base64://）→ 文件引用 seg。
+   * 返回 null = 无需转换；false = 转换失败（调用方按"跳过"处理）。
+   * 引用形式 {file_id, name, size, ref:1}：接收方渲染时向转发者自动拉取。
+   */
+  _inlineToRef(seg) {
+    const d = seg.data ?? {};
+    const inline = (d.url && String(d.url).startsWith('data:')) || (d.file && String(d.file).startsWith('base64://'));
+    if (!inline && !d.file_id) return null;
+    if (d.file_id) {
+      // 已是引用：确保本机可服务（自己转发的在 filesDir；收到的需已下载）
+      if (!this._ensureServeFile(String(d.file_id), String(d.name ?? '媒体'), Number(d.size) || 0)) return false;
+      return seg;
+    }
+    try {
+      let b64 = '';
+      let mime = '';
+      if (d.url && String(d.url).startsWith('data:')) {
+        const m = /^data:([^;,]+)?;base64,([\s\S]*)$/.exec(String(d.url));
+        if (!m) return false;
+        mime = m[1] ?? '';
+        b64 = m[2];
+      } else {
+        b64 = String(d.file).slice('base64://'.length);
+      }
+      const buf = Buffer.from(b64, 'base64');
+      if (!buf.length) return false;
+      const ext = MIME_EXT.get(mime) ?? path.extname(String(d.name ?? ''));
+      const fid = crypto.randomUUID();
+      fs.mkdirSync(this.filesDir, { recursive: true });
+      fs.writeFileSync(path.join(this.filesDir, fid), buf);
+      const name = String(d.name ?? `${seg.type}${ext || '.bin'}`);
+      this.outFiles.set(fid, { name, size: buf.length });
+      this._saveOutRegistry();
+      const nd = { ...d, file_id: fid, name, size: buf.length, ref: 1 };
+      delete nd.url;
+      delete nd.file;
+      return { ...seg, data: nd };
+    } catch {
+      return false;
+    }
+  }
+
+  /** 转发前确保 fid 内容在本机 filesDir（缺则从已保存的下载副本复制），并注册 outFiles。 */
+  _ensureServeFile(fid, name, size) {
+    const local = path.join(this.filesDir, fid);
+    if (!fs.existsSync(local)) {
+      const done = this.downloadsDone.get(fid);
+      const src = done?.path && fs.existsSync(done.path) ? done.path : null;
+      if (!src) return false;
+      fs.mkdirSync(this.filesDir, { recursive: true });
+      fs.copyFileSync(src, local);
+      this.outFiles.set(fid, { name, size: fs.statSync(local).size });
+      this._saveOutRegistry();
+      return true;
+    }
+    if (!this.outFiles.has(fid)) {
+      this.outFiles.set(fid, { name, size: Number(size) || fs.statSync(local).size });
+      this._saveOutRegistry();
+    }
+    return true;
+  }
+
+  /** fid → 本机文件路径（filesDir 直存 或 已下载副本），无则 null。 */
+  _localFileFor(fid) {
+    if (!fid || !/^[0-9a-f-]{8,40}$/i.test(String(fid))) return null;
+    const a = path.join(this.filesDir, String(fid));
+    if (fs.existsSync(a)) return a;
+    const p = this.downloadsDone.get(String(fid))?.path;
+    return p && fs.existsSync(p) ? p : null;
+  }
+
   async _forwardMessages({ userId, groupId, mode = 'one', items } = {}) {
     const list = Array.isArray(items) ? items.filter((x) => Array.isArray(x?.segs) && x.segs.length) : [];
     if (!list.length) throw new Error('没有可转发的消息');
     const isGroup = groupId != null && groupId !== '';
-    const MAX_ITEMS = 50;
-    const MAX_BYTES = 8 * 1024 * 1024;
+    const MAX_ITEMS = 200;
+    const MAX_BYTES = 200 * 1024 * 1024;
     // 文件准备：缺 filesDir/<fid> 的从已保存的下载副本复制，并注册进 outFiles
     const prepared = [];
     const skipped = [];
     for (const it of list.slice(0, MAX_ITEMS)) {
       let ok = true;
       let badName = '';
+      const segs = [];
       for (const seg of it.segs) {
-        if (seg?.type !== 'file' || !seg.data?.file_id) continue;
-        const fid = String(seg.data.file_id);
-        const local = path.join(this.filesDir, fid);
-        if (!fs.existsSync(local)) {
-          const done = this.downloadsDone.get(fid);
-          const src = done?.path && fs.existsSync(done.path) ? done.path : null;
-          if (!src) { ok = false; badName = String(seg.data.name ?? '文件'); break; }
-          fs.mkdirSync(this.filesDir, { recursive: true });
-          fs.copyFileSync(src, local);
-          this.outFiles.set(fid, { name: String(seg.data.name ?? done.name ?? 'file'), size: fs.statSync(local).size });
-          this._saveOutRegistry();
-        } else if (!this.outFiles.has(fid)) {
-          this.outFiles.set(fid, { name: String(seg.data.name ?? 'file'), size: Number(seg.data.size) || 0 });
-          this._saveOutRegistry();
+        if (!seg || typeof seg !== 'object' || !seg.type) { segs.push(seg); continue; }
+        // 文件卡片：确保内容在 filesDir 可服务
+        if (seg.type === 'file' && seg.data?.file_id) {
+          if (!this._ensureServeFile(String(seg.data.file_id), String(seg.data.name ?? '文件'), Number(seg.data.size) || 0)) {
+            ok = false; badName = String(seg.data.name ?? '文件'); break;
+          }
+          segs.push(seg);
+          continue;
         }
+        // 图片/语音/视频的内嵌 base64：落成文件引用（接收方打开时自动拉取），转发体积极大缩小
+        const ref = this._inlineToRef(seg);
+        if (ref === false) { ok = false; badName = String(seg.data?.name ?? '媒体'); break; }
+        segs.push(ref === null ? seg : ref);
       }
-      if (ok) prepared.push({ sender_name: String(it.sender_name ?? ''), time: Number(it.time) || 0, segs: it.segs });
+      if (ok) prepared.push({ sender_name: String(it.sender_name ?? ''), time: Number(it.time) || 0, segs });
       else skipped.push(badName);
     }
     if (!prepared.length) throw new Error(`文件尚未保存到本机，无法转发：${[...new Set(skipped)].join('、')}`);
