@@ -16,6 +16,9 @@ let peers = {};        // accountId -> 是否设备在线（P2P 直连）
 let modalMode = null;  // 当前弹窗：friends | create-group | profile | null
 let restoredOnce = false; // 是否已经做过"恢复上次会话"（只在首条 hello 做一次）
 const chatCache = new Map(); // chatKey -> {messages:[], loadedRemote}
+let pickSel = null;    // 多选模式：{ ids: Map(message_id -> msg) }，null=未开启（转发功能的入口）
+const fwdReg = new Map(); // 合并转发卡片展开数据：fwdId -> items（引用，不复制）
+let fwdSeq = 0;        // 合并转发卡片分配 id 用
 
 /* ---------- 头像：本机生成（SVG data URI，零网络请求）；
    联系人头像用对方设备自报的（P2P 通讯得到），没有则本机生成 ---------- */
@@ -463,6 +466,7 @@ async function openChat(key) {
   }
   updatePeerPill();
   renderMemberPanel();
+  exitPickMode();
   if (!chatCache.has(key)) chatCache.set(key, { messages: [], loadedRemote: false });
   renderMessages(chatCache.get(key).messages);
   send({ type: 'read', chatKey: key });
@@ -475,6 +479,7 @@ async function openChat(key) {
 // 手机端返回列表（桌面端按钮隐藏，点了也没副作用）
 function exitChatToMobileList() {
   document.body.classList.remove('mobile-chat');
+  exitPickMode();
   activeChat = null;
   $('chat-pane').hidden = true;
   $('chat-empty').hidden = false;
@@ -529,15 +534,29 @@ function messageEl(msg) {
   // 撤回按钮：只给自己发的、还没送达的消息（桥会校验，已发出的会拒绝）
   const recallBtn = (mine && msg.queued && !msg.recalled)
     ? '<button class="msg-quote-btn recall-btn" title="撤回这条消息">撤回</button>' : '';
-  row.innerHTML = `<img class="avatar" src="${esc(avatarOfUser(uin, name))}" onerror="this.style.visibility='hidden'">
+  // 多选模式：行首勾选框（已撤回的消息不可选）；普通模式行尾"多选"按钮入口
+  const selecting = !!pickSel;
+  const pickable = !msg.recalled;
+  const checkHtml = selecting && pickable
+    ? `<label class="msg-check"><input type="checkbox" data-pick="${esc(String(msg.message_id))}" ${pickSel.ids.has(String(msg.message_id)) ? 'checked' : ''}></label>`
+    : '';
+  row.innerHTML = `${checkHtml}<img class="avatar" src="${esc(avatarOfUser(uin, name))}" onerror="this.style.visibility='hidden'">
     <div class="bubble-wrap">
       <div class="sender">${esc(name)} · ${esc(fmtTime(msg.time))}</div>
       <div class="bubble ${msg.recalled ? 'recalled' : ''}">${msg.recalled ? '（已撤回）' : renderSegments(msg.message, mine)}</div>
       ${readMark}
     </div>
-    ${msg.recalled ? '' : recallBtn + '<button class="msg-quote-btn" title="引用这条消息">引用</button>'}
-    <button class="msg-quote-btn del-msg-btn" title="删除这条消息（仅本机）">删除</button>`;
-  row.querySelector('.msg-quote-btn:not(.recall-btn):not(.del-msg-btn)')?.addEventListener('click', () => setReply(msg));
+    ${msg.recalled || selecting ? '' : recallBtn + '<button class="msg-quote-btn" title="引用这条消息">引用</button>'}
+    ${msg.recalled || selecting ? '' : '<button class="msg-quote-btn pick-btn" title="多选转发">多选</button>'}
+    ${selecting ? '' : '<button class="msg-quote-btn del-msg-btn" title="删除这条消息（仅本机）">删除</button>'}`;
+  row.classList.toggle('selecting', selecting);
+  row.querySelector('.msg-quote-btn:not(.recall-btn):not(.del-msg-btn):not(.pick-btn)')?.addEventListener('click', () => setReply(msg));
+  row.querySelector('.pick-btn')?.addEventListener('click', () => enterPickMode(msg));
+  row.querySelector('[data-pick]')?.addEventListener('change', (e) => {
+    const id = e.target.dataset.pick;
+    if (e.target.checked) pickSel?.ids.set(id, msg); else pickSel?.ids.delete(id);
+    renderPickBar();
+  });
   row.querySelector('.recall-btn')?.addEventListener('click', () => recallMessage(msg));
   row.querySelector('.del-msg-btn')?.addEventListener('click', (e) => { e.stopPropagation(); confirmDeleteMessage(msg); });
   // 手机：长按气泡删除（与点击图片放大、文件卡片操作不冲突——只在 bubble-wrap 上长按）
@@ -580,6 +599,122 @@ function confirmDeleteMessage(msg) {
       }
     })
     .catch((e) => { alert(`删除失败：${e.message}`); });
+}
+
+/* ---------- 多选转发：勾选本会话消息 → 逐条/合并转发给指定联系人或群 ---------- */
+function enterPickMode(firstMsg) {
+  if (!activeChat) return;
+  pickSel = { ids: new Map() };
+  if (firstMsg && !firstMsg.recalled) pickSel.ids.set(String(firstMsg.message_id), firstMsg);
+  ensurePickBar();
+  renderMessages(chatCache.get(activeChat.key).messages);
+  renderPickBar();
+}
+function exitPickMode() {
+  if (!pickSel) return;
+  pickSel = null;
+  $('pick-bar')?.classList.remove('active');
+  if (activeChat) renderMessages(chatCache.get(activeChat.key).messages);
+}
+function renderPickBar() {
+  const bar = $('pick-bar');
+  if (!bar || !pickSel) return;
+  bar.classList.add('active');
+  $('pick-count').textContent = `已选 ${pickSel.ids.size} 条（仅本会话）`;
+  $('pick-fwd-one').disabled = $('pick-fwd-merged').disabled = pickSel.ids.size === 0;
+}
+function ensurePickBar() {
+  if ($('pick-bar')) return;
+  const bar = document.createElement('div');
+  bar.id = 'pick-bar';
+  bar.innerHTML = `<span id="pick-count">已选 0 条</span>
+    <button class="mini primary" id="pick-fwd-one">逐条转发</button>
+    <button class="mini primary" id="pick-fwd-merged">合并转发</button>
+    <button class="mini" id="pick-cancel">取消</button>`;
+  $('composer').parentElement.insertBefore(bar, $('composer'));
+  $('pick-cancel').addEventListener('click', exitPickMode);
+  $('pick-fwd-one').addEventListener('click', () => doForward('one'));
+  $('pick-fwd-merged').addEventListener('click', () => doForward('merged'));
+}
+function doForward(mode) {
+  if (!pickSel || !pickSel.ids.size) return;
+  const items = [...pickSel.ids.values()]
+    .sort((a, b) => (a.time ?? 0) - (b.time ?? 0))
+    .map((m) => ({
+      sender_name: m.self_sent ? (selfInfo?.nickname || '我') : (m.sender?.card || m.sender?.nickname || `账号 ${m.sender?.user_id ?? m.user_id ?? ''}`),
+      time: m.time ?? 0,
+      segs: m.message,
+    }));
+  openForwardPicker(items, mode);
+}
+/** 目标选择弹窗：好友 + 本地群，点行即转发。 */
+function openForwardPicker(items, mode) {
+  const ov = document.createElement('div');
+  ov.className = 'pick-overlay';
+  const rows = [];
+  for (const f of friends) {
+    rows.push(`<div class="pick-row" data-fid="${esc(String(f.user_id))}">
+      <img src="${esc(avatarOfUser(f.user_id, f.nickname || f.remark))}" onerror="this.style.visibility='hidden'">
+      <span class="pick-name">${esc(f.remark || f.nickname || `账号 ${f.user_id}`)}</span>
+      <span class="pick-tag">好友</span></div>`);
+  }
+  for (const g of groups) {
+    rows.push(`<div class="pick-row" data-gid="${esc(String(g.group_id))}">
+      <img src="${esc(avatarOfUser(g.group_id, g.group_name))}" onerror="this.style.visibility='hidden'">
+      <span class="pick-name">${esc(g.group_name || `群 ${g.group_id}`)}</span>
+      <span class="pick-tag">群 · ${g.members?.length ?? 0} 人</span></div>`);
+  }
+  ov.innerHTML = `<div class="pick-panel">
+    <div class="pick-head">${mode === 'merged' ? '合并转发' : '逐条转发'} ${items.length} 条消息给：</div>
+    <div class="pick-body">${rows.join('') || '<div style="padding:20px;color:var(--text-sub)">暂无好友和群</div>'}</div>
+    <div style="padding:10px 16px;border-top:1px solid var(--border)"><button class="mini" id="fwd-pick-cancel">取消</button></div>
+  </div>`;
+  document.body.appendChild(ov);
+  const close = () => ov.remove();
+  ov.querySelector('#fwd-pick-cancel').addEventListener('click', close);
+  ov.addEventListener('click', (e) => { if (e.target === ov) close(); });
+  ov.querySelector('.pick-body').addEventListener('click', async (e) => {
+    const rowEl = e.target.closest('.pick-row');
+    if (!rowEl) return;
+    const payload = { mode, items };
+    if (rowEl.dataset.gid) payload.groupId = rowEl.dataset.gid;
+    else payload.userId = rowEl.dataset.fid;
+    rowEl.style.opacity = '.5';
+    try {
+      const r = await rpc('forward-messages', payload);
+      close();
+      exitPickMode();
+      const skipped = r?.skipped?.length ? `；跳过 ${r.skipped.length} 条（文件未保存：${[...new Set(r.skipped)].join('、')}）` : '';
+      $('send-hint').textContent = `已转发 ${r?.sent ?? 0} 条${skipped}${r?.queued ? '，对方离线已排队' : ''}`;
+      setTimeout(() => { if ($('send-hint').textContent.startsWith('已转发')) $('send-hint').textContent = ''; }, 5000);
+    } catch (err) {
+      rowEl.style.opacity = '';
+      alert(`转发失败：${err.message}`);
+    }
+  });
+}
+
+/* ---------- 合并转发卡片：点击展开查看原始消息 ---------- */
+document.addEventListener('click', (e) => {
+  const card = e.target.closest('[data-fwd]');
+  if (card) openFwdViewer(fwdReg.get(card.dataset.fwd) ?? []);
+});
+function openFwdViewer(items) {
+  const ov = document.createElement('div');
+  ov.className = 'fwd-overlay';
+  const body = items.length
+    ? items.map((it) => `<div class="fwd-item">
+        <div class="fwd-item-head">${esc(it.sender_name || '')} · ${esc(fmtTime(it.time))}</div>
+        <div class="fwd-item-body">${renderSegments(it.segs ?? [], false)}</div>
+      </div>`).join('')
+    : '<div style="padding:20px;color:var(--text-sub)">（空）</div>';
+  ov.innerHTML = `<div class="fwd-panel">
+    <div class="fwd-panel-head"><b>合并转发 · ${items.length} 条消息</b><button class="fwd-close">✕</button></div>
+    <div class="fwd-panel-body">${body}</div>
+  </div>`;
+  document.body.appendChild(ov);
+  ov.querySelector('.fwd-close').addEventListener('click', () => ov.remove());
+  ov.addEventListener('click', (e) => { if (e.target === ov) ov.remove(); });
 }
 
 /* ---------- 文件：发（📎 上传→发卡片）与收（点保存才拉取） ---------- */
@@ -729,7 +864,19 @@ function renderSegments(segs, mine = false) {
         break;
       }
       case 'json': case 'ark': html += `<div class="card-seg">[卡片消息]</div>`; break;
-      case 'forward': html += `<div class="card-seg">[合并转发]</div>`; break;
+      case 'forward': {
+        // 合并转发卡片：点击展开查看原始消息列表（嵌套转发同样支持）
+        const items = Array.isArray(d.items) ? d.items : [];
+        const id = `f${++fwdSeq}`;
+        fwdReg.set(id, items);
+        const names = [...new Set(items.map((x) => x?.sender_name).filter(Boolean))].slice(0, 3).join('、');
+        html += `<div class="fwd-card" data-fwd="${esc(id)}" title="点击查看">
+          <div class="fwd-title">📎 合并转发 · ${items.length} 条消息</div>
+          <div class="fwd-sub">${esc(names || '聊天记录')}</div>
+          <div class="fwd-hint">点击查看</div>
+        </div>`;
+        break;
+      }
       default: html += `<div class="card-seg">[${esc(seg.type)}]</div>`;
     }
   }
@@ -745,6 +892,7 @@ function previewLocal(record) {
     else if (s.type === 'at') parts.push('@…');
     else     if (s.type === 'record') parts.push('[语音]');
     else if (s.type === 'reply') parts.push('[引用]');
+    else if (s.type === 'forward') parts.push('[合并转发]');
     else parts.push(`[${s.type}]`);
   }
   return parts.join('').slice(0, 60);

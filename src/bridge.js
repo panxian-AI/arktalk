@@ -324,6 +324,7 @@ export class Bridge {
       case 'remove-group': return this._removeGroup(p);
       case 'send-private': return await this._sendPrivate(p);
       case 'send-to-group': return await this._sendToGroup(p);
+      case 'forward-messages': return await this._forwardMessages(p);
       case 'send-file': return await this._sendFile(p);
       case 'recall-message': return this._recallMessage(p);
       case 'delete-message': return this._deleteMessage(p);
@@ -1172,6 +1173,62 @@ export class Bridge {
     try { this.store.append(`g${gid}`, record); } catch (e) { this.log(`群消息落盘失败：${e.message}`, 'warn'); }
     this._broadcast({ type: 'self-msg', chatKey: `g${gid}`, record });
     return { results, failed: results.filter((r) => !r.ok).length };
+  }
+
+  /**
+   * 转发消息：mode='one' 逐条按原样重发；mode='merged' 打成一条合并转发卡片（type:'forward'）。
+   * 文件归属：file seg 的内容由 filesDir/<fid> 服务——自己发过的直接可用；接收的文件若已保存，
+   * 转发前复制进 filesDir 并注册 outFiles（第三人下载时向转发者拉取）。未保存的文件跳过并回报。
+   */
+  async _forwardMessages({ userId, groupId, mode = 'one', items } = {}) {
+    const list = Array.isArray(items) ? items.filter((x) => Array.isArray(x?.segs) && x.segs.length) : [];
+    if (!list.length) throw new Error('没有可转发的消息');
+    const isGroup = groupId != null && groupId !== '';
+    const MAX_ITEMS = 50;
+    const MAX_BYTES = 8 * 1024 * 1024;
+    // 文件准备：缺 filesDir/<fid> 的从已保存的下载副本复制，并注册进 outFiles
+    const prepared = [];
+    const skipped = [];
+    for (const it of list.slice(0, MAX_ITEMS)) {
+      let ok = true;
+      let badName = '';
+      for (const seg of it.segs) {
+        if (seg?.type !== 'file' || !seg.data?.file_id) continue;
+        const fid = String(seg.data.file_id);
+        const local = path.join(this.filesDir, fid);
+        if (!fs.existsSync(local)) {
+          const done = this.downloadsDone.get(fid);
+          const src = done?.path && fs.existsSync(done.path) ? done.path : null;
+          if (!src) { ok = false; badName = String(seg.data.name ?? '文件'); break; }
+          fs.mkdirSync(this.filesDir, { recursive: true });
+          fs.copyFileSync(src, local);
+          this.outFiles.set(fid, { name: String(seg.data.name ?? done.name ?? 'file'), size: fs.statSync(local).size });
+          this._saveOutRegistry();
+        } else if (!this.outFiles.has(fid)) {
+          this.outFiles.set(fid, { name: String(seg.data.name ?? 'file'), size: Number(seg.data.size) || 0 });
+          this._saveOutRegistry();
+        }
+      }
+      if (ok) prepared.push({ sender_name: String(it.sender_name ?? ''), time: Number(it.time) || 0, segs: it.segs });
+      else skipped.push(badName);
+    }
+    if (!prepared.length) throw new Error(`文件尚未保存到本机，无法转发：${[...new Set(skipped)].join('、')}`);
+    if (mode === 'merged') {
+      const payload = JSON.stringify(prepared);
+      if (payload.length > MAX_BYTES) throw new Error('合并内容过大，请减少条数或去掉大图');
+      const seg = { type: 'forward', data: { items: prepared } };
+      const r = isGroup ? await this._sendToGroup({ groupId, message: [seg] }) : this._sendToPeerPersist(Number(userId), [seg]);
+      return { sent: 1, skipped, queued: !!(r && r.queued) };
+    }
+    // 逐条：保持时间顺序重发原 segs
+    let sent = 0;
+    let queued = false;
+    for (const it of prepared) {
+      const r = isGroup ? await this._sendToGroup({ groupId, message: it.segs }) : this._sendToPeerPersist(Number(userId), it.segs);
+      sent += 1;
+      queued = queued || !!(r && r.queued);
+    }
+    return { sent, skipped, queued };
   }
 
   // ---------- 跨网穿透（OpenP2P，可选） ----------
