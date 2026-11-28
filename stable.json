@@ -1,26 +1,15 @@
 {
-  "version": "0.6.8",
-  "versionCode": 35,
-  "tag": "v0.6.8",
+  "version": "0.6.9",
+  "versionCode": 36,
+  "tag": "v0.6.9",
   "stable": true,
   "published": "2026-11-28",
-  "notes": "新功能：优化加好友流程——可单向发送好友申请，对方同意即成好友；可随时修改好友备注。修复：电脑端数据目录固定到用户主目录，换版本/换解压目录不再更换账号，跨网通讯不再因账号变化而中断。",
+  "notes": "新功能：内测资格代码与测试版更新通道——检测更新处可输入内测码解锁测试版，与正式版自动取版本号更高者。延续 0.6.8：好友申请（单向申请、同意即成好友）、好友备注；数据目录固定到用户主目录，换版本不换号。",
   "assets": {
-    "windows": "https://github.com/panxian-AI/arktalk/releases/download/v0.6.8/ArkTalk-0.6.8-win64.zip",
-    "android": "https://github.com/panxian-AI/arktalk-android/releases/download/v0.6.8/arktalk-v0.6.8-release.apk"
+    "windows": "https://github.com/panxian-AI/arktalk/releases/download/v0.6.9/ArkTalk-0.6.9-win64.zip",
+    "android": "https://github.com/panxian-AI/arktalk-android/releases/download/v0.6.9/arktalk-v0.6.9-release.apk"
   },
-  "beta": {
-    "version": "0.6.9",
-    "versionCode": 36,
-    "tag": "v0.6.9-beta.1",
-    "beta": true,
-    "published": "2026-11-28",
-    "notes": "测试版：新增内测资格代码与测试版更新通道（检测更新处输入内测码解锁）；好友申请、改备注延续。数据目录已固定，升级不换号。",
-    "assets": {
-      "windows": "https://github.com/panxian-AI/arktalk/releases/download/v0.6.9-beta.1/ArkTalk-0.6.9-win64.zip",
-      "android": "https://github.com/panxian-AI/arktalk-android/releases/download/v0.6.9-beta.1/arktalk-v0.6.9-beta.1-release.apk"
-    }
-  },
+  "beta": null,
   "betaCodeHash": "28abd4672798dd885ba42d6302381b8ddeebab440356630cd6776c7d802e4379",
   "_说明": "只有 stable=true 的版本才会被客户端检测为可更新。日常修复版照常发 Release，但不要改这个文件——只有用户明确说『这是正式版/稳定版』时才把 version/tag/assets 更新到这里并推送。beta 区：发测试版时填入 {version,versionCode,tag,beta:true,published,notes,assets}，只有输入内测码（sha256=betaCodeHash）解锁的客户端才会检测并下载测试版；betaCodeHash 本身可以公开，内测码原文绝不提交。"
 }
