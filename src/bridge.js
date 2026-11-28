@@ -76,8 +76,9 @@ export class Bridge {
     this.recalled = new Map();
     // 下载登记：fileId -> {where, path, size, time}（落盘），用来回答"这个文件下没下过"
     this.downloadsDone = new Map();
-    this.local = { profile: null, friends: [], groups: [] };
+    this.local = { profile: null, friends: [], groups: [], friendRequests: [] };
     this._loadLocal();
+    this._tempRelayIds = new Set(); // 好友申请临时隧道账号（发申请/待回应期间纳入 OpenP2P，不写入联系人）
     if (!this.local.profile) {
       // 账号认设备：首次运行自动生成本机账号 ID，无需注册
       this.local.profile = { accountId: Math.floor(100000000 + Math.random() * 900000000), nickname: '', avatar: '' };
@@ -309,6 +310,10 @@ export class Bridge {
     switch (name) {
       case 'set-profile': return this._setProfile(p);
       case 'add-friend': return this._addFriend(p);
+      case 'set-remark': return this._setRemark(p);
+      case 'send-friend-request': return await this._sendFriendRequest(p);
+      case 'list-friend-requests': return this._listFriendRequests();
+      case 'respond-friend-request': return await this._respondFriendRequest(p);
       case 'remove-friend': return this._removeFriend(p);
       case 'create-group': return this._createGroup(p);
       case 'remove-group': return this._removeGroup(p);
@@ -680,6 +685,132 @@ export class Bridge {
     return { added: true, user_id: uid };
   }
 
+  // ---------- 好友申请（单向发申请 + 对方同意；跨网靠 OpenP2P 临时隧道） ----------
+  /** 随时修改对某联系人的备注（仅本机，对方无感）。 */
+  _setRemark({ userId, remark } = {}) {
+    const uid = Number(userId);
+    const f = this.local.friends.find((x) => Number(x.user_id) === uid);
+    if (!f) throw new Error('对方不在联系人列表');
+    f.remark = String(remark ?? '').trim();
+    this._saveLocal();
+    this._broadcastHello();
+    return { ok: true, user_id: uid, remark: f.remark };
+  }
+
+  /** 发出好友申请：给对方账号临时建隧道，发一条 friend-request 控制消息。 */
+  async _sendFriendRequest({ userId, name, message } = {}) {
+    const uid = Number(userId);
+    if (!Number.isInteger(uid) || uid <= 0) throw new Error('请输入有效的对方账号（数字）');
+    if (uid === Number(this.local.profile?.accountId)) throw new Error('不能添加自己');
+    if (this.local.friends.some((f) => Number(f.user_id) === uid)) throw new Error('对方已在联系人列表');
+    // 去重：已有待处理申请就不重复发
+    const dup = (this.local.friendRequests ?? []).find((r) =>
+      Number(r.from) === uid && r.direction === 'out' && r.status === 'pending');
+    if (dup) return { ok: true, duplicate: true };
+
+    // 临时把对方账号纳入 OpenP2P 隧道，拿到 127.0.0.1 端点（不写入联系人）
+    this._tempRelayIds.add(String(uid));
+    this._refreshRelay();
+    if (this.local.settings?.openp2pToken) {
+      const addr = this.openp2p.relayMap[String(uid)];
+      if (addr) this.link.setEndpoint(uid, addr);
+    }
+
+    const id = `fr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const segs = [{ type: 'friend-request', id, from: String(this.local.profile?.accountId ?? ''),
+      name: String(name ?? this.local.profile?.nickname ?? '').trim(),
+      message: String(message ?? '').trim() }];
+    const { queued } = this.link.send(uid, segs);
+    const req = { id, from: uid, name: segs[0].name, message: segs[0].message,
+      time: Math.floor(Date.now() / 1000), direction: 'out', status: 'pending' };
+    this.local.friendRequests.push(req);
+    this._saveLocal();
+    this._broadcast({ type: 'friend-requests', requests: this._listFriendRequests().requests });
+    return { ok: true, queued, id };
+  }
+
+  /** 列出好友申请（含发出与收到）。 */
+  _listFriendRequests() {
+    const me = String(this.local.profile?.accountId ?? '');
+    const list = (this.local.friendRequests ?? []).map((r) => ({
+      id: r.id, from: r.from, name: r.name || `账号 ${r.from}`, message: r.message || '',
+      time: r.time, direction: r.direction || (String(r.from) === me ? 'out' : 'in'), status: r.status
+    }));
+    return { requests: list };
+  }
+
+  /** 回应收到的好友申请：同意则双方各自把对方加入联系人，并回一条 friend-accept。 */
+  async _respondFriendRequest({ id, accept } = {}) {
+    const req = (this.local.friendRequests ?? []).find((r) => r.id === id && r.direction === 'in');
+    if (!req) throw new Error('申请不存在或已处理');
+    req.status = accept ? 'accepted' : 'rejected';
+    if (accept) {
+      const uid = Number(req.from);
+      if (!this.local.friends.some((f) => Number(f.user_id) === uid)) {
+        this.local.friends.push({ user_id: uid, nickname: String(req.name ?? ''), remark: String(req.name ?? ''), endpoint: '' });
+      }
+      // 临时隧道留给同意流程回执用；对方地址也可能已通过端点学习得到
+      this._tempRelayIds.add(String(uid));
+      this._refreshRelay();
+      if (this.local.settings?.openp2pToken) {
+        const addr = this.openp2p.relayMap[String(uid)];
+        if (addr) this.link.setEndpoint(uid, addr);
+      }
+      const segs = [{ type: 'friend-accept', id: req.id, from: String(this.local.profile?.accountId ?? ''),
+        name: String(this.local.profile?.nickname ?? '') }];
+      this.link.send(uid, segs);
+      this._pushProfileTo(uid);
+    } else {
+      this._tempRelayIds.delete(String(req.from));
+      this._refreshRelay();
+    }
+    this._saveLocal();
+    this._broadcastHello();
+    this._broadcast({ type: 'friend-requests', requests: this._listFriendRequests().requests });
+    return { ok: true, accepted: !!accept };
+  }
+
+  /** 收到对方同意：把我发出的申请标记 accepted，对方加入联系人。 */
+  _onFriendAccept(from, seg) {
+    const req = (this.local.friendRequests ?? []).find((r) => r.id === seg.id && r.direction === 'out');
+    if (req) req.status = 'accepted';
+    const uid = Number(from);
+    if (!this.local.friends.some((f) => Number(f.user_id) === uid)) {
+      this.local.friends.push({ user_id: uid, nickname: String(seg.name ?? ''), remark: String(seg.name ?? ''), endpoint: '' });
+    }
+    this._tempRelayIds.delete(String(uid));
+    this._saveLocal();
+    this._broadcastHello();
+    this._refreshRelay();
+    this._broadcast({ type: 'friend-requests', requests: this._listFriendRequests().requests });
+    this.log(`账号 ${from} 同意了你的好友申请`, 'info');
+  }
+
+  /** 收到好友申请：记入收件箱并广播给界面弹窗。 */
+  _onFriendRequest(from, seg) {
+    const uid = Number(from);
+    if (uid === Number(this.local.profile?.accountId)) return;
+    if (this.local.friends.some((f) => Number(f.user_id) === uid)) return; // 已是好友忽略
+    if ((this.local.friendRequests ?? []).some((r) => r.id === seg.id)) return; // 去重
+    this.local.friendRequests.push({
+      id: String(seg.id ?? `fr_${Date.now()}`), from: uid,
+      name: String(seg.name ?? `账号 ${uid}`), message: String(seg.message ?? ''),
+      time: Math.floor(Date.now() / 1000), direction: 'in', status: 'pending'
+    });
+    // 保留临时隧道，方便回执
+    this._tempRelayIds.add(String(uid));
+    this._refreshRelay();
+    this._saveLocal();
+    const requests = this._listFriendRequests().requests;
+    this._broadcast({ type: 'friend-request-new', request: requests[requests.length - 1], requests });
+    this.log(`收到账号 ${uid} 的好友申请`, 'info');
+  }
+
+  /** 给单个账号推资料（好友申请同意后立即互报昵称头像）。 */
+  _pushProfileTo(uid) {
+    try { this.link.pushProfile(uid, this.local.profile); } catch { /* ignore */ }
+  }
+
   /**
    * 删除联系人。
    * @param {object} p
@@ -1043,6 +1174,8 @@ export class Bridge {
     const token = this.local.settings?.openp2pToken;
     if (!token) { this.openp2p.stop(); return; }
     const ids = this.local.friends.map((f) => String(f.user_id));
+    // 好友申请期间临时纳入对方账号（不写入联系人），申请处理完即移除
+    for (const t of this._tempRelayIds ?? []) if (!ids.includes(String(t))) ids.push(String(t));
     const relayMap = this.openp2p.start(token, this.local.profile.accountId, ids);
     for (const [id, addr] of Object.entries(relayMap)) this.link.setEndpoint(id, addr);
   }
@@ -1129,9 +1262,10 @@ export class Bridge {
         profile: j.profile ?? null,
         friends: Array.isArray(j.localFriends) ? j.localFriends : [],
         groups: Array.isArray(j.localGroups) ? j.localGroups : [],
+        friendRequests: Array.isArray(j.friendRequests) ? j.friendRequests : [],
         settings: j.settings ?? {}
       };
-    } catch { this.local = { profile: null, friends: [], groups: [], settings: {} }; }
+    } catch { this.local = { profile: null, friends: [], groups: [], friendRequests: [], settings: {} }; }
   }
   _saveLocal() {
     try {
@@ -1139,6 +1273,7 @@ export class Bridge {
         profile: this.local.profile,
         localFriends: this.local.friends,
         localGroups: this.local.groups,
+        friendRequests: this.local.friendRequests ?? [],
         settings: this.local.settings ?? {}
       }, null, 1));
     } catch (e) { this.log(`本机数据保存失败：${e.message}`, 'warn'); }
@@ -1318,6 +1453,7 @@ export class Bridge {
       self: { ...this.local.profile },
       friends: this.local.friends,
       groups: this.local.groups,
+      friendRequests: this._listFriendRequests().requests,
       chats: this._chatSummaries(),
       peers: this.link.onlineMap()
     };
@@ -1325,8 +1461,16 @@ export class Bridge {
   _broadcastHello() { this._broadcast(this._helloPayload()); }
 
   // ---------- P2P 事件 ----------
-  /** 收到对方设备的消息：只有手动添加过的联系人才收（完全独立，不认陌生人）。 */
+  /** 收到对方设备的消息：好友申请/同意等控制消息优先处理（可来自非联系人），其余只认联系人。 */
   _onPeerMessage(m) {
+    // 好友申请控制消息：segs 首元素是 {type:'friend-request'|'friend-accept'}
+    const first = Array.isArray(m.segs) ? m.segs[0] : null;
+    if (first && typeof first === 'object' && first.type === 'friend-request') {
+      this._onFriendRequest(m.from, first); return;
+    }
+    if (first && typeof first === 'object' && first.type === 'friend-accept') {
+      this._onFriendAccept(m.from, first); return;
+    }
     const key = `p${m.from}`;
     const contact = this.local.friends.find((f) => String(f.user_id) === m.from);
     if (!contact) { this.log(`忽略来自未知账号 ${m.from} 的消息`); return; }

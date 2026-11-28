@@ -8,6 +8,7 @@ let ws = null;
 let uiCfg = null;      // /api/config（uiToken 等）
 let selfInfo = null;   // 本机账号资料 {accountId, nickname, avatar}
 let friends = [];      // 联系人（本机管理）[{user_id, nickname, remark, avatar?, endpoint?, local}]
+let friendRequests = []; // 好友申请 [{id, from, name, message, time, direction, status}]
 let groups = [];       // 群（本机管理）[{group_id, group_name, members?, local}]
 let chats = [];        // [{chatKey, lastTime, lastPreview, unread}]
 let activeChat = null; // {key, type:'p'|'g', id, name, avatar}
@@ -69,8 +70,9 @@ function handleFrame(m) {
   switch (m.type) {
     case 'hello': {
       selfInfo = m.self; friends = m.friends ?? []; groups = m.groups ?? []; chats = m.chats ?? [];
+      friendRequests = m.friendRequests ?? friendRequests;
       peers = m.peers ?? {};
-      renderSelf(); renderList(); updatePeerPill();
+      renderSelf(); renderList(); updatePeerPill(); renderFriendRequestBadge();
       // 首次 hello：恢复上次聊到一半的会话（手机端文件选择器导致页面重载时，不至于被甩回列表）
       if (!restoredOnce) {
         restoredOnce = true;
@@ -94,6 +96,19 @@ function handleFrame(m) {
       renderList();
       updatePeerPill();
       renderMemberPanel();
+      break;
+    }
+    case 'friend-requests': {
+      friendRequests = m.requests ?? [];
+      renderFriendRequestBadge();
+      if (modalMode === 'friendreq') openFriendRequestsModal();
+      break;
+    }
+    case 'friend-request-new': {
+      friendRequests = m.requests ?? friendRequests;
+      renderFriendRequestBadge();
+      // 收到新申请时自动弹窗提醒（若当前没开其它重要弹窗）
+      if (!modalMode) openFriendRequestsModal();
       break;
     }
     case 'event': onEvent(m); break;
@@ -294,7 +309,8 @@ function renderList() {
       const c = chats.find((x) => x.chatKey === key);
       const name = f.remark || f.nickname || `账号 ${f.user_id}`;
       box.appendChild(itemEl(key, avatarOfUser(f.user_id, name), name,
-        c?.lastPreview || (peers[String(f.user_id)] ? '在线 · 可直连' : '离线 · 消息会排队'), '', c?.unread ?? 0, { delete: () => confirmRemoveFriend(f.user_id, name) }));
+        c?.lastPreview || (peers[String(f.user_id)] ? '在线 · 可直连' : '离线 · 消息会排队'), '', c?.unread ?? 0,
+        { edit: () => editRemark(f.user_id, name), delete: () => confirmRemoveFriend(f.user_id, name) }));
     }
     if (!friends.length) box.innerHTML = '<div class="list-empty">还没有联系人<br>点右上角 ＋ 添加</div>';
   } else if (tab === 'groups') {
@@ -307,6 +323,33 @@ function renderList() {
     }
     if (!groups.length) box.innerHTML = '<div class="list-empty">还没有群聊<br>点右上角 ＋ 创建</div>';
   }
+}
+
+/** 改联系人备注（仅本机生效，随时可改）。 */
+function editRemark(userId, oldName) {
+  modalMode = 'set-remark';
+  openModal(`<div class="modal-title">修改备注</div>
+    <div class="form-row"><input id="sr-remark" value="${esc(oldName || '')}" placeholder="备注名"></div>
+    <div class="pf-hint">备注只显示在你这边，对方不会知道，也不会改变聊天记录。</div>
+    <div class="form-err" id="sr-err" hidden></div>
+    <div class="modal-actions">
+      <button class="ghost" id="sr-cancel">取消</button>
+      <button id="sr-ok">保存</button>
+    </div>`);
+  $('sr-cancel').onclick = closeModal;
+  $('sr-ok').onclick = async () => {
+    const err = $('sr-err'); err.hidden = true;
+    $('sr-ok').disabled = true;
+    try {
+      await rpc('set-remark', { userId, remark: $('sr-remark').value });
+      const f = friends.find((x) => String(x.user_id) === String(userId));
+      if (f) f.remark = $('sr-remark').value.trim();
+      closeModal(); renderList();
+      if (activeChat?.key === `p${userId}`) $('chat-name').textContent = f?.remark || f?.nickname || oldName;
+    } catch (e) { err.textContent = e.message; err.hidden = false; }
+    $('sr-ok').disabled = false;
+  };
+  setTimeout(() => { $('sr-remark').focus(); $('sr-remark').select(); }, 0);
 }
 
 /** 删除联系人：可选连带删除本机聊天记录（不影响对方设备）。 */
@@ -380,8 +423,12 @@ function itemEl(key, avatar, name, preview, time, unread, opts = {}) {
     <div class="item-main"><div class="item-name">${esc(name)}</div><div class="item-preview">${esc(preview)}</div></div>
     ${time ? `<span class="item-time">${esc(time)}</span>` : ''}
     ${unread > 0 ? `<span class="badge">${unread > 99 ? '99+' : unread}</span>` : ''}
+    ${opts.edit ? '<button class="item-edit" title="改备注">✎</button>' : ''}
     ${opts.delete ? '<button class="item-del" title="删除">✕</button>' : ''}`;
   div.onclick = () => openChat(key);
+  if (opts.edit) {
+    div.querySelector('.item-edit').onclick = (e) => { e.stopPropagation(); opts.edit(); };
+  }
   if (opts.delete) {
     div.querySelector('.item-del').onclick = (e) => { e.stopPropagation(); opts.delete(); };
   }
@@ -1326,47 +1373,110 @@ function openProfileModal(pendingAvatar) {
   setTimeout(() => $('pf-nick').focus(), 0);
 };
 
-/* 联系人弹窗：手动添加（对方账号 + 连接地址），支持粘贴对方发来的连接信息 */
+/* 联系人弹窗：发好友申请（只需对方账号）为主，手动加地址为高级选项 */
 function openFriendsModal() {
   modalMode = 'friends';
+  const incoming = (friendRequests ?? []).filter((r) => r.direction === 'in' && r.status === 'pending').length;
   openModal(`<div class="modal-title">添加联系人</div>
-    <div class="form-row ci-row">
-      <input id="af-uid" placeholder="对方账号或粘贴连接信息（账号@地址）" inputmode="text">
-      <button class="mini" id="af-paste" title="从剪贴板粘贴连接信息">粘贴</button>
-    </div>
-    <div class="form-row"><input id="af-remark" placeholder="备注（可选）"></div>
-    <div class="form-row"><input id="af-endpoint" placeholder="对方连接地址（可选，多个用逗号分隔）"></div>
-    <div class="pf-hint">连接信息形如 772592327@192.168.1.5:3021 —— 让对方在「我的账号」里复制发给你。地址可填多个（换网自动轮换）；对方连上来后其最新地址也会自动记录。留空地址时消息会排队。</div>
+    <div class="form-row"><input id="af-uid" placeholder="对方账号（数字）" inputmode="numeric"></div>
+    <div class="form-row"><input id="af-name" placeholder="你的昵称（对方看到的名字，可选）"></div>
+    <div class="form-row"><input id="af-msg" placeholder="附言（可选，如：我是XX）"></div>
+    <div class="pf-hint">填对方账号发申请，对方同意后即可聊天，无需交换 IP。需双方都开着 ArkTalk 且填了同一个跨网令牌。</div>
     <div class="form-err" id="af-err" hidden></div>
     <div class="modal-actions">
+      <button class="ghost" id="af-reqs">好友申请${incoming ? `（${incoming} 条待处理）` : ''}</button>
+      <button class="ghost" id="af-advanced">手动添加</button>
+    </div>
+    <div id="af-adv-box" hidden style="margin-top:10px">
+      <div class="form-row ci-row">
+        <input id="af-endpoint" placeholder="对方连接地址（可选，多个用逗号分隔）">
+        <button class="mini" id="af-paste" title="从剪贴板粘贴连接信息">粘贴</button>
+      </div>
+      <div class="pf-hint">连接信息形如 772592327@192.168.1.5:3021 —— 手动直连时用，一般发申请即可。</div>
+    </div>
+    <div class="modal-actions">
       <button class="ghost" id="af-cancel">关闭</button>
-      <button id="af-ok">添加</button>
+      <button id="af-ok">发送申请</button>
     </div>`);
   $('af-cancel').onclick = closeModal;
+  $('af-reqs').onclick = () => openFriendRequestsModal();
+  $('af-advanced').onclick = () => { const b = $('af-adv-box'); b.hidden = !b.hidden; };
   $('af-paste').onclick = async () => {
     let text = '';
     try { text = await navigator.clipboard.readText(); } catch { /* WebView 可能禁读剪贴板 */ }
-    if (!text) { $('af-uid').focus(); return; } // 读不到就让用户长按输入框自己粘
+    if (!text) { $('af-uid').focus(); return; }
     applyConnInfo(text.trim());
   };
   $('af-ok').onclick = async () => {
     const err = $('af-err');
     err.hidden = true;
+    const uid = $('af-uid').value.trim();
+    const endpoint = $('af-endpoint')?.value.trim() ?? '';
     $('af-ok').disabled = true;
     try {
-      applyConnInfo($('af-uid').value.trim()); // 输入框里直接粘了"账号@地址"也能自动拆
-      const res = await rpc('add-friend', {
-        userId: $('af-uid').value.trim(),
-        remark: $('af-remark').value.trim(),
-        endpoint: $('af-endpoint').value.trim()
-      });
-      closeModal();
-      $('send-hint').textContent = res?.exists ? '对方已在联系人里' : '已添加';
+      // 填了连接地址走旧的手动添加（立即生效）；否则发好友申请
+      if (endpoint) {
+        const res = await rpc('add-friend', { userId: uid, remark: $('af-name').value.trim(), endpoint });
+        closeModal();
+        $('send-hint').textContent = res?.exists ? '对方已在联系人里' : '已添加';
+      } else {
+        const res = await rpc('send-friend-request', {
+          userId: uid, name: $('af-name').value.trim(), message: $('af-msg').value.trim()
+        });
+        closeModal();
+        $('send-hint').textContent = res?.duplicate ? '已发过申请，等对方同意' : (res?.queued ? '申请已发出（对方上线后收到）' : '申请已发出');
+      }
       setTimeout(() => { $('send-hint').textContent = ''; }, 3500);
     } catch (e) { err.textContent = e.message; err.hidden = false; }
     $('af-ok').disabled = false;
   };
   setTimeout(() => $('af-uid').focus(), 0);
+}
+
+/** 好友申请列表弹窗：待处理的申请可同意/拒绝，发出的显示状态 */
+function openFriendRequestsModal() {
+  modalMode = 'friendreq';
+  const list = friendRequests ?? [];
+  const pending = list.filter((r) => r.direction === 'in' && r.status === 'pending');
+  const others = list.filter((r) => !(r.direction === 'in' && r.status === 'pending'));
+  const row = (r) => {
+    const isIn = r.direction === 'in';
+    const statusTxt = r.status === 'accepted' ? '已同意' : r.status === 'rejected' ? '已拒绝' : '等待对方同意';
+    const when = r.time ? new Date(r.time * 1000).toLocaleString() : '';
+    return `<div class="fr-item">
+      <div class="fr-head"><b>${esc(r.name || ('账号 ' + r.from))}</b><span class="fr-meta">账号 ${esc(r.from)} · ${when}</span></div>
+      ${r.message ? `<div class="fr-msg">${esc(r.message)}</div>` : ''}
+      ${isIn && r.status === 'pending'
+        ? `<div class="fr-actions"><button class="mini" data-fr-accept="${esc(r.id)}">同意</button><button class="mini ghost" data-fr-reject="${esc(r.id)}">拒绝</button></div>`
+        : `<div class="fr-status">${isIn ? '' : '发出：'}${statusTxt}</div>`}
+    </div>`;
+  };
+  openModal(`<div class="modal-title">好友申请</div>
+    <div class="fr-list">${pending.length ? pending.map(row).join('') : '<div class="list-empty">没有待处理的申请</div>'}</div>
+    ${others.length ? `<div class="fr-subtitle">历史</div><div class="fr-list">${others.slice(-10).map(row).join('')}</div>` : ''}
+    <div class="modal-actions"><button class="ghost" id="fr-close">关闭</button></div>`);
+  $('fr-close').onclick = () => { closeModal(); };
+  document.querySelectorAll('[data-fr-accept]').forEach((b) => b.onclick = async () => {
+    b.disabled = true;
+    try { await rpc('respond-friend-request', { id: b.getAttribute('data-fr-accept'), accept: true }); }
+    catch (e) { alert(e.message); }
+  });
+  document.querySelectorAll('[data-fr-reject]').forEach((b) => b.onclick = async () => {
+    b.disabled = true;
+    try { await rpc('respond-friend-request', { id: b.getAttribute('data-fr-reject'), accept: false }); }
+    catch (e) { alert(e.message); }
+  });
+}
+
+/** 联系人 tab 上的待处理申请角标 */
+function renderFriendRequestBadge() {
+  const badge = $('fr-badge');
+  if (!badge) return;
+  const n = (friendRequests ?? []).filter((r) => r.direction === 'in' && r.status === 'pending').length;
+  badge.hidden = n === 0;
+  badge.textContent = n > 9 ? '9+' : String(n);
+  const tab = $('rail-friends');
+  if (tab) tab.title = n ? `联系人（${n} 条好友申请待处理）` : '联系人';
 }
 
 /** 解析/填充连接信息：'账号@地址1,地址2' / 纯账号 / 纯地址 三种形态。 */

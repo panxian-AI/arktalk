@@ -5,6 +5,7 @@
 //   · p2p（默认）：设备间 WS 直连（跨网由内置 OpenP2P 映射）
 //   · snowluma（可选）：SnowLuma 注入本进程/本机后经 OneBot v11 收发——注入即可用
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -29,6 +30,38 @@ function resolveStoragePath(p, fallback) {
   if (!p || typeof p !== 'string' || !p.trim()) return fallback;
   const s = p.trim();
   return path.isAbsolute(s) ? path.normalize(s) : path.resolve(appRoot, s);
+}
+
+/**
+ * 数据目录必须与程序版本解耦：旧实现默认用 <解压目录>/data，
+ * 每升一个版本解压到新文件夹 = 全新 data = 当作新设备随机生成账号 →
+ * 账号一变 OpenP2P 节点名 arktalk-<账号> 就变，手机通讯录存的旧号对不上，跨网永远不通。
+ * 现在默认固定到用户主目录下的 ArkTalk/data（换版本不随程序目录变），
+ * 并在首次使用时把旧的程序内 data 一次性迁移过去（保留原目录，不删），
+ * 这样当前账号/联系人/令牌/聊天记录/好友申请全部延续，不再换号。
+ */
+function resolveDataDir(cfg) {
+  const bundled = path.join(appRoot, 'data');
+  const configured = cfg.storage?.dataDir;
+  // 用户在设置里显式选过目录：尊重它（原样走老逻辑）。
+  if (configured && String(configured).trim()) {
+    return resolveStoragePath(configured, bundled);
+  }
+  // 未配置 → 固定的用户目录，与解压目录/版本无关。
+  const stable = path.join(os.homedir(), 'ArkTalk', 'data');
+  try {
+    fs.mkdirSync(stable, { recursive: true });
+    // 首次迁移：目标还没有 contacts.json，而旧的程序内 data 有 → 复制过去。
+    const hasStable = fs.existsSync(path.join(stable, 'contacts.json'));
+    if (!hasStable && fs.existsSync(path.join(bundled, 'contacts.json'))) {
+      fs.cpSync(bundled, stable, { recursive: true, force: false, errorOnExist: false });
+      console.log(`[数据迁移] 已从 ${bundled} 复制到 ${stable}（账号/联系人/令牌保留，原目录未删）`);
+    }
+  } catch (e) {
+    console.error(`[数据迁移] 失败，回退到程序内 data：${e?.message || e}`);
+    return bundled;
+  }
+  return stable;
 }
 
 /** SnowLuma 注入通道（可选）：自发现 token 后连接上游 OneBot。 */
@@ -62,7 +95,7 @@ async function main() {
     console.log(`[${new Date().toLocaleTimeString('zh-CN', { hour12: false })}] [${level}] ${msg}`);
 
   const cfg = readConfig();
-  const dataDir = resolveStoragePath(cfg.storage?.dataDir, path.join(appRoot, 'data'));
+  const dataDir = resolveDataDir(cfg);
   const downloadsDir = resolveStoragePath(cfg.storage?.downloadsDir, '');
   const store = new LocalStore(dataDir, log);
   const ob = await maybeConnectSnowluma(cfg, log);

@@ -268,6 +268,30 @@ body { font: 14px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; color: var(--te
   .item-del { opacity: 1; width: 34px; height: 34px; font-size: 15px; }
 }
 
+/* 0.6.8：联系人改备注按钮（在删除按钮左侧） */
+.item-edit { position: absolute; right: 38px; top: 50%; transform: translateY(-50%); border: 0; background: var(--hover); color: var(--text-sub); width: 26px; height: 26px; border-radius: 13px; font-size: 13px; line-height: 1; cursor: pointer; opacity: 0; transition: opacity .12s; }
+.item:hover .item-edit { opacity: 1; }
+.item-edit:hover { background: var(--accent-weak); color: var(--accent); }
+@media (max-width: 760px) {
+  .item-edit { opacity: 1; width: 34px; height: 34px; right: 40px; font-size: 15px; }
+}
+
+/* 0.6.8：好友申请入口角标（联系人 tab 上） */
+.rail-btn { position: relative; }
+.fr-badge { position: absolute; top: 0; right: 0; min-width: 15px; height: 15px; line-height: 15px; text-align: center; background: var(--badge, #e5484d); color: #fff; border-radius: 8px; font-size: 10px; padding: 0 3px; }
+
+/* 0.6.8：好友申请列表 */
+.fr-list { max-height: 46vh; overflow-y: auto; margin: 8px 0; }
+.fr-item { padding: 10px 12px; margin: 6px 0; background: var(--hover); border-radius: 10px; }
+.fr-head { display: flex; align-items: baseline; gap: 8px; }
+.fr-head b { font-size: 14px; color: var(--text); }
+.fr-meta { font-size: 11px; color: var(--text-sub); }
+.fr-msg { font-size: 12px; color: var(--text-sub); margin-top: 5px; word-break: break-word; }
+.fr-actions { display: flex; gap: 8px; margin-top: 8px; }
+.fr-actions .mini { min-width: 56px; }
+.fr-status { margin-top: 6px; font-size: 11px; color: var(--text-sub); }
+.fr-subtitle { font-size: 12px; color: var(--text-sub); margin-top: 12px; padding-left: 2px; }
+
 /* 侧栏顶部的在线概览（谁在线一眼可见，不靠猜圆点） */
 #online-bar { margin: 0 10px 6px; padding: 6px 10px; border-radius: 8px; font-size: 12px; line-height: 1.5;
   color: var(--text-sub); background: var(--hover); display: flex; align-items: center; gap: 6px; }

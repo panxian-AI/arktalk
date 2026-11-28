@@ -1,13 +1,13 @@
 {
-  "version": "0.6.7",
-  "versionCode": 34,
-  "tag": "v0.6.7",
+  "version": "0.6.8",
+  "versionCode": 35,
+  "tag": "v0.6.8",
   "stable": true,
   "published": "2026-11-28",
-  "notes": "紧急修复：安卓端更新检查一直超时。多线路测速改用守护线程+应用层硬超时，镜像线路优先，DNS 卡死不再拖到超时；下载增加总时长兜底。",
+  "notes": "新功能：优化加好友流程——可单向发送好友申请，对方同意即成好友；可随时修改好友备注。修复：电脑端数据目录固定到用户主目录，换版本/换解压目录不再更换账号，跨网通讯不再因账号变化而中断。",
   "assets": {
-    "windows": "https://github.com/panxian-AI/arktalk/releases/download/v0.6.7/ArkTalk-0.6.7-win64.zip",
-    "android": "https://github.com/panxian-AI/arktalk-android/releases/download/v0.6.7/arktalk-v0.6.7-release.apk"
+    "windows": "https://github.com/panxian-AI/arktalk/releases/download/v0.6.8/ArkTalk-0.6.8-win64.zip",
+    "android": "https://github.com/panxian-AI/arktalk-android/releases/download/v0.6.8/arktalk-v0.6.8-release.apk"
   },
   "_说明": "只有 stable=true 的版本才会被客户端检测为可更新。日常修复版照常发 Release，但不要改这个文件——只有用户明确说『这是正式版/稳定版』时才把 version/tag/assets 更新到这里并推送。"
 }
