@@ -18,7 +18,7 @@
     "notes": "测试版新功能：地址学习——自动记录并持久化与好友连通成功的地址，换网/重启后优先重试历史成功地址，恢复在线更快；失败地址指数退避冷却，不再反复撞死地址；诊断包新增地址池展示。",
     "assets": {
       "windows": "https://github.com/panxian-AI/arktalk/releases/download/v0.7.0-beta.1/ArkTalk-0.7.0-win64.zip",
-      "android": "https://github.com/panxian-AI/arktalk-android/releases/download/v0.7.0-beta.1/arktalk-v0.7.0-beta.1-release.apk"
+      "android": "https://gh-proxy.com/https://github.com/panxian-AI/arktalk-android/releases/download/v0.7.0-beta.1/arktalk-v0.7.0-beta.1-release.apk"
     }
   },
   "betaCodeHash": "28abd4672798dd885ba42d6302381b8ddeebab440356630cd6776c7d802e4379",
